@@ -38,12 +38,19 @@ def minimize(input_path: str, output_path: str, gpu_id: int = 0) -> None:
     fixer.removeHeterogens(keepWater=False)
     fixer.findMissingAtoms()
     fixer.addMissingAtoms()
-    fixer.addMissingHydrogens(pH=7.0)
 
     # --- Force field: AMBER14 (matches downstream GROMACS ff) ---
     ff = ForceField("amber14-all.xml", "amber14/tip3p.xml")
 
+    # Strip any pre-existing hydrogens, then add a single clean, consistent set.
+    # Some inputs ship pre-protonated (e.g. 1vfb); leftover H left in place collide
+    # with the mutated residue and produce atom sets the force field can't template
+    # ("N/H atoms too many/few"). Rebuilding H from heavy atoms mirrors the path
+    # taken by unprotonated inputs and avoids the mismatch.
     modeller = Modeller(fixer.topology, fixer.positions)
+    modeller.delete([a for a in modeller.topology.atoms()
+                     if a.element is not None and a.element.symbol == "H"])
+    modeller.addHydrogens(ff, pH=7.0)
 
     system = ff.createSystem(
         modeller.topology,
