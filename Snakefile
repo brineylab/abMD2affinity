@@ -34,13 +34,16 @@
 # production run starts until the full preprocessing batch is archived.
 # Set config["s5cmd_dest"] = "" to skip the sync (production starts immediately).
 #
+# GPU: openmm_minimize and production_md each request 1 GPU (resources: gpu=1).
+# Launch under Slurm so each job is allocated its own GPU; GROMACS/OpenMM pick
+# up the allocated device via CUDA_VISIBLE_DEVICES.
+#
 # Run (local):
-#   snakemake --configfile config.yaml --cores 32 \
-#       --resources gpu0=1 gpu1=1 gpu2=1 gpu3=1
+#   snakemake --configfile config.yaml --cores 32 --resources gpu=<n_gpus>
 # Dry-run:
 #   snakemake --configfile config.yaml -n
 # Single system:
-#   snakemake --configfile config.yaml --cores 8 --resources gpu0=1 \
+#   snakemake --configfile config.yaml --cores 8 --resources gpu=1 \
 #       results/MD/1dqj/1dqj_H-D32A/md.gro
 # Slurm:
 #   sbatch slurm/submit_pipeline.sbatch
@@ -58,10 +61,8 @@ PRE    = OUT / "preprocessing"
 MD     = OUT / "MD"
 MOVIES = OUT / "movies"
 
-N_GPUS      = int(config.get("n_gpus", 4))
 CPU_THREADS = int(config.get("cpu_threads", 8))
 
-GMX            = config.get("gmx_bin", "gmx")
 PDB2PQR        = config.get("pdb2pqr_bin", "pdb2pqr")
 GMX_PYTHON     = config.get("gmx_python_bin", "python3")
 PYMOL_PYTHON   = config.get("pymol_python_bin", "python")
@@ -83,8 +84,6 @@ if not SYSTEMS:
     raise ValueError(
         "No systems parsed — check config['mutants_tsv'] and config['structures']."
     )
-_SYSTEM_KEYS = list(SYSTEMS)
-
 # Constrain {mut} to the exact set of valid mutation tags so Snakemake never
 # tries to apply rules to stale or unrelated files in the output tree.
 _MUTS_PATTERN = "(?:" + "|".join(
@@ -104,10 +103,6 @@ def sys_key(wc) -> str:
 
 def sys_data(wc) -> dict:
     return SYSTEMS[sys_key(wc)]
-
-
-def gpu_for(wc) -> int:
-    return _SYSTEM_KEYS.index(sys_key(wc)) % N_GPUS
 
 
 _PDBS = [v["pdb"] for v in SYSTEMS.values()]
@@ -200,20 +195,14 @@ rule openmm_minimize:
         pdb = str(PRE / "{pdb}" / "{pdb}_{mut}" / "01_mutated.pdb"),
     output:
         pdb = str(PRE / "{pdb}" / "{pdb}_{mut}" / "minimized.pdb"),
-    params:
-        gpu = gpu_for,
     resources:
-        gpu0 = lambda wc: 1 if gpu_for(wc) == 0 else 0,
-        gpu1 = lambda wc: 1 if gpu_for(wc) == 1 else 0,
-        gpu2 = lambda wc: 1 if gpu_for(wc) == 2 else 0,
-        gpu3 = lambda wc: 1 if gpu_for(wc) == 3 else 0,
+        gpu = 1,
     log:
         str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "openmm_minimize.log"),
     shell:
         """
         {OPENMM_PYTHON} scripts/minimize_openmm.py \
             {input.pdb} {output.pdb} \
-            --gpu {params.gpu} \
             > {log} 2>&1
         """
 
@@ -258,7 +247,7 @@ rule pdb2gmx:
         """
         ROOT=$(pwd)
         cd $(dirname {output.gro})
-        {GMX} pdb2gmx \
+        gmx pdb2gmx \
             -f protonated.pdb \
             -o protein.gro \
             -p topol_base.top \
@@ -282,7 +271,7 @@ rule editconf:
         str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "editconf.log"),
     shell:
         """
-        printf 'Protein\n' | {GMX} editconf \
+        printf 'Protein\n' | gmx editconf \
             -f {input.gro} \
             -o {output.gro} \
             -princ -c -d 1.2 -bt triclinic \
@@ -306,7 +295,7 @@ rule solvate:
     shell:
         """
         cp {input.top} {output.top}
-        {GMX} solvate \
+        gmx solvate \
             -cp {input.gro} \
             -cs spc216.gro \
             -o {output.gro} \
@@ -335,14 +324,14 @@ rule genion:
         cp {input.top} {output.top}
         ROOT=$(pwd)
         cd $(dirname {output.gro})
-        {GMX} grompp \
+        gmx grompp \
             -f "$ROOT/{input.mdp}" \
             -c "$ROOT/{input.gro}" \
             -p topol_ions.top \
             -o ions.tpr \
             -maxwarn 1 \
             >> "$ROOT/{log}" 2>&1
-        printf 'SOL' | {GMX} genion \
+        printf 'SOL' | gmx genion \
             -s ions.tpr \
             -o ions.gro \
             -p topol_ions.top \
@@ -371,14 +360,14 @@ rule gromacs_em:
         """
         ROOT=$(pwd)
         cd $(dirname {output.gro})
-        {GMX} grompp \
+        gmx grompp \
             -f "$ROOT/{input.mdp}" \
             -c ions.gro \
             -p topol_ions.top \
             -o em.tpr \
             -maxwarn 0 \
             >> "$ROOT/{log}" 2>&1
-        {GMX} mdrun \
+        gmx mdrun \
             -v -deffnm em \
             -ntmpi 1 -ntomp {threads} \
             >> "$ROOT/{log}" 2>&1
@@ -405,7 +394,7 @@ rule nvt:
         """
         ROOT=$(pwd)
         cd $(dirname {output.gro})
-        {GMX} grompp \
+        gmx grompp \
             -f "$ROOT/{input.mdp}" \
             -c em.gro \
             -r em.gro \
@@ -413,7 +402,7 @@ rule nvt:
             -o nvt.tpr \
             -maxwarn 0 \
             >> "$ROOT/{log}" 2>&1
-        {GMX} mdrun \
+        gmx mdrun \
             -v -deffnm nvt \
             -ntmpi 1 -ntomp {threads} \
             >> "$ROOT/{log}" 2>&1
@@ -444,7 +433,7 @@ rule npt:
         """
         ROOT=$(pwd)
         cd $(dirname {output.gro})
-        {GMX} grompp \
+        gmx grompp \
             -f "$ROOT/{input.mdp}" \
             -c nvt.gro \
             -r nvt.gro \
@@ -453,7 +442,7 @@ rule npt:
             -o npt.tpr \
             -maxwarn 0 \
             >> "$ROOT/{log}" 2>&1
-        {GMX} mdrun \
+        gmx mdrun \
             -v -deffnm npt \
             -ntmpi 1 -ntomp {threads} \
             >> "$ROOT/{log}" 2>&1
@@ -501,14 +490,9 @@ rule production_md:
         gro = str(MD / "{pdb}" / "{pdb}_{mut}" / "md.gro"),
         xtc = str(MD / "{pdb}" / "{pdb}_{mut}" / "md.xtc"),
         tpr = str(MD / "{pdb}" / "{pdb}_{mut}" / "md.tpr"),
-    params:
-        gpu = gpu_for,
     threads: CPU_THREADS
     resources:
-        gpu0 = lambda wc: 1 if gpu_for(wc) == 0 else 0,
-        gpu1 = lambda wc: 1 if gpu_for(wc) == 1 else 0,
-        gpu2 = lambda wc: 1 if gpu_for(wc) == 2 else 0,
-        gpu3 = lambda wc: 1 if gpu_for(wc) == 3 else 0,
+        gpu = 1,
     log:
         str(MD / "{pdb}" / "{pdb}_{mut}" / "logs" / "md.log"),
     shell:
@@ -520,7 +504,7 @@ rule production_md:
 
         if [ ! -f "$TPR" ]; then
             cd "$PREDIR"
-            {GMX} grompp \
+            gmx grompp \
                 -f "$ROOT/{input.mdp}" \
                 -c npt.gro \
                 -t npt.cpt \
@@ -534,12 +518,11 @@ rule production_md:
         cd "$MDDIR"
         CPI=""
         [ -f md.cpt ] && CPI="-cpi md.cpt"
-        {GMX} mdrun \
+        gmx mdrun \
             -v -deffnm md \
             -s md.tpr \
             $CPI \
             -ntmpi 1 -ntomp {threads} \
-            -gpu_id {params.gpu} \
             -nb gpu -pme gpu -bonded gpu -update gpu \
             >> "$ROOT/{log}" 2>&1
         """
@@ -573,14 +556,14 @@ rule movie:
 
         # Solute = everything except water (SOL) and ions (NA/CL); keeps glycans.
         # Single unnamed group -> index 0 in the .ndx.
-        {GMX} select -s {input.tpr} \
+        gmx select -s {input.tpr} \
             -on "$NDX" \
             -select 'not resname SOL NA CL' \
             > {log} 2>&1
 
         # Strip solvent/ions, make molecules whole, center; optionally decimate.
         # Feed group 0 twice: centering group, then output group.
-        {{ echo 0; echo 0; }} | {GMX} trjconv \
+        {{ echo 0; echo 0; }} | gmx trjconv \
             -s {input.tpr} -f {input.xtc} -n "$NDX" \
             -o "$SOLPDB" \
             -pbc mol -center -skip {params.skip} \

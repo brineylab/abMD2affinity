@@ -26,7 +26,7 @@ exec podman run --rm \
         ldconfig 2>/dev/null || true
         snakemake --configfile config.yaml \
             --config mutants_tsv=data/mutants_test.tsv mdp_md=mdp/md_1ns.mdp auto_wt=false \
-            --cores $CORES --resources gpu0=1 \
+            --cores $CORES --resources gpu=1 \
             --keep-going --rerun-incomplete --printshellcmds \
             all
     "

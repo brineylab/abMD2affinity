@@ -32,6 +32,21 @@ structures:
   1dqjfab:
     file: "data/structures/1dqjfab.pdb"    # Fab: chains A,B,C — antibody is B(H)/A(L)
     chain_map: {H: B, L: A}
+  1vfbfv:
+    file: "data/structures/1vfbfv.pdb"     # Fv:  chains A,B,C — antibody is B(H)/A(L), C=lysozyme
+    chain_map: {H: B, L: A}
+  2nyyfv:
+    file: "data/structures/2nyyfv.pdb"     # Fv:  chains A,C,D — antibody is D(H)/C(L), A=antigen
+    chain_map: {H: D, L: C}
+  2nyyfab:
+    file: "data/structures/2nyyfab.pdb"    # Fab: chains A,C,D — antibody is D(H)/C(L), A=antigen
+    chain_map: {H: D, L: C}
+  2nz9fv:
+    file: "data/structures/2nz9fv.pdb"     # Fv:  chains A,C,D — antibody is D(H)/C(L), A=antigen
+    chain_map: {H: D, L: C}
+  2nz9fab:
+    file: "data/structures/2nz9fab.pdb"    # Fab: chains A,C,D — antibody is D(H)/C(L), A=antigen
+    chain_map: {H: D, L: C}
 
 # --- Output ---
 # results/preprocessing/{pdb}/{pdb}_{mutant}/   — chain extraction through NPT equilibration
@@ -51,7 +66,6 @@ movie_skip: 1     # keep every Nth frame (raise for long trajectories)
 movie_fps: 15
 
 # --- Compute ---
-n_gpus: 1
 cpu_threads: 8
 
 # --- Object-storage checkpoint ---
@@ -60,7 +74,6 @@ cpu_threads: 8
 s5cmd_dest: ""   # e.g. "s3://my-bucket/md2affinity/preprocessing/"
 
 # --- Executables (container env paths) ---
-gmx_bin:           "gmx"                              # md env (on PATH)
 pdb2pqr_bin:       "pdb2pqr"                          # md env (on PATH)
 gmx_python_bin:    "python3"                          # md env — extract_chains.py
 pymol_python_bin:  "/opt/conda/envs/pymol/bin/python" # mutate_structure.py

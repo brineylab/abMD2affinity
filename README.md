@@ -136,15 +136,16 @@ access as described above.
 snakemake --configfile config.yaml -n
 
 # Full run
-snakemake --configfile config.yaml --cores 32 --resources gpu0=1
+snakemake --configfile config.yaml --cores 32 --resources gpu=<n_gpus>
 
 # Short smoke test: one mutant per PDB, 1 ns (wraps the container + GPU wiring)
 bash scripts/run_test_1ns.sh
 ```
 
-GPU-bound rules (`openmm_minimize`, `production_md`) are scheduled round-robin
-across the `gpu0..gpu3` resource pools; keep the `--resources gpuN=1` flags in
-sync with `n_gpus` in `config.yaml`.
+GPU-bound rules (`openmm_minimize`, `production_md`) each request 1 GPU
+(`resources: gpu=1`); pass `--resources gpu=N` (or, under Slurm, let the sbatch
+script derive it) so Snakemake runs up to `N` of them concurrently. Each process
+picks up its allocated device via `CUDA_VISIBLE_DEVICES`.
 
 ## Scripts
 
