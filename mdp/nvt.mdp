@@ -1,0 +1,49 @@
+; NVT equilibration — 100 ps at constant volume
+integrator              = md
+dt                      = 0.002
+nsteps                  = 50000
+
+; Output
+nstxout                 = 0
+nstvout                 = 0
+nstfout                 = 0
+nstenergy               = 500
+nstlog                  = 500
+nstxout-compressed      = 500
+compressed-x-grps       = System
+
+; Neighbor searching
+cutoff-scheme           = Verlet
+nstlist                 = 10
+ns_type                 = grid
+pbc                     = xyz
+
+; Electrostatics and VdW
+coulombtype             = PME
+rcoulomb                = 1.0
+vdwtype                 = Cut-off
+rvdw                    = 1.0
+DispCorr                = EnerPres
+
+; Bonds
+constraints             = h-bonds
+constraint-algorithm    = LINCS
+lincs-iter              = 1
+lincs-order             = 4
+
+; Temperature coupling (V-rescale)
+tcoupl                  = V-rescale
+tc-grps                 = Protein Non-Protein
+tau_t                   = 0.1     0.1
+ref_t                   = 300     300
+
+; Pressure coupling — none for NVT
+pcoupl                  = no
+
+; Velocity generation
+gen_vel                 = yes
+gen_temp                = 300
+gen_seed                = -1
+
+; Position restraints on protein heavy atoms
+define                  = -DPOSRES

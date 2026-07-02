@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Snakemake workflow state
+.snakemake/
+
+# Generated pipeline outputs (MD trajectories, checkpoints, movies, etc.)
+results/
