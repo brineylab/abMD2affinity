@@ -83,6 +83,15 @@ def main():
                     help="list what would be submitted; submit nothing")
     args = ap.parse_args()
 
+    # GPU env for enroot's NVIDIA hook. These must be present in each job's
+    # environment at *container start* so the hook injects the CUDA driver;
+    # setting them inside run_md.sh would be too late (that runs inside the
+    # already-started container). sbatch inherits this process's environment
+    # (--export=ALL), so setting them here propagates to every job we submit.
+    # setdefault: respect an explicit override from the calling shell.
+    os.environ.setdefault("NVIDIA_VISIBLE_DEVICES", "all")
+    os.environ.setdefault("NVIDIA_DRIVER_CAPABILITIES", "compute,utility")
+
     rows = read_rows(args.experiments_path)
     os.makedirs(MARKER_DIR, exist_ok=True)
 

@@ -18,10 +18,12 @@
 # object storage and clears scratch.
 #
 # GPU note: the CUDA driver is injected into the container by enroot's NVIDIA
-# hook, which needs NVIDIA_VISIBLE_DEVICES + NVIDIA_DRIVER_CAPABILITIES set at
-# container start. Those live in ~/.config/enroot/environ.d/10-nvidia.env — that
-# file is a prerequisite for this script (without it, mdrun reports "no
-# compatible GPU").
+# hook, which needs NVIDIA_VISIBLE_DEVICES + NVIDIA_DRIVER_CAPABILITIES set *at
+# container start*. Exporting them in this script would be too late — the whole
+# script runs inside the already-started container. launch_experiments.py sets
+# them in the submitting environment so sbatch (--export=ALL) carries them into
+# each job; a ~/.config/enroot/environ.d/10-nvidia.env file does the same job-
+# independently. Without one of these, mdrun reports "no compatible GPU".
 
 # --- job -------------------------------------------------------------------
 #SBATCH --job-name=abmd                 # overridden per-system on submit
