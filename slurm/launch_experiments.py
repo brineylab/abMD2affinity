@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Submit production-MD + movie jobs (slurm/run_md.sh), one per row in a mutants
+"""Submit production-MD jobs (slurm/run_md.sh), one per row in a mutants
 TSV, keeping at most --cap jobs in the Slurm queue at a time.
 
     python slurm/launch_experiments.py [data/completed_mutants.tsv] \

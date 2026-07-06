@@ -1,9 +1,9 @@
 #!/bin/bash
 #
-# run_md.sh — production MD (100 ns) + trajectory movie for ONE system, run
-# inside the abMD2affinity container. Submitted once per system by
-# slurm/launch_experiments.py. Mirrors the Snakefile `production_md` + `movie`
-# rules, but as a standalone per-job script (no Snakemake on the compute node).
+# run_md.sh — production MD (100 ns) for ONE system, run inside the
+# abMD2affinity container. Submitted once per system by
+# slurm/launch_experiments.py. Mirrors the Snakefile `production_md` rule, but
+# as a standalone per-job script (no Snakemake on the compute node).
 #
 # Args (passed by launch_experiments.py):
 #   $1  pdb_id         e.g. 1bj1fv
@@ -13,7 +13,7 @@
 #   results/preprocessing/<pdb>/<pdb>_<tag>/{npt.gro,npt.cpt,topol_ions.top}
 #   mdp/md.mdp
 # grompp runs *in* that prepped dir so topol_ions.top's #includes resolve; the
-# md.tpr it emits is fully self-contained, so mdrun + movie then run entirely on
+# md.tpr it emits is fully self-contained, so mdrun then runs entirely on
 # local /tmp scratch. sync_job_dir (from ~/.env) uploads the finished run to
 # object storage and clears scratch.
 #
@@ -74,23 +74,9 @@ gmx mdrun -v -deffnm md -s md.tpr ${CPI} \
     -ntmpi 1 -ntomp "${THREADS}" \
     -nb gpu -pme gpu -bonded gpu -update gpu
 
-echo "[$(date)] ${SYS}: movie (solute only)"
-gmx select -s md.tpr -on solute.ndx -select 'not resname SOL NA CL'
-{ echo 0; echo 0; } | gmx trjconv \
-    -s md.tpr -f md.xtc -n solute.ndx \
-    -o solute.pdb -pbc mol -center -skip 1
-/opt/conda/envs/pymol/bin/python "${PROJECT_DIR}/scripts/render_movie.py" \
-    solute.pdb frames
-ffmpeg -y -framerate 15 -i "frames/frame_%04d.png" \
-    -c:v libx264 -pix_fmt yuv420p \
-    -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2' \
-    "${SYS}.mp4"
-rm -rf frames solute.pdb solute.ndx
-
 # Keep lightweight artifacts on shared storage for quick local inspection
 # (the full run — incl. md.xtc — goes to object storage via sync_job_dir).
-mkdir -p "${PROJECT_DIR}/results/movies" "${PROJECT_DIR}/results/launch/logs"
-cp "${SYS}.mp4" "${PROJECT_DIR}/results/movies/${SYS}.mp4"
+mkdir -p "${PROJECT_DIR}/results/launch/logs"
 cp md.log "${PROJECT_DIR}/results/launch/logs/${SYS}.md.log"
 
 echo "[$(date)] ${SYS}: sync_job_dir -> object storage, clear scratch"
