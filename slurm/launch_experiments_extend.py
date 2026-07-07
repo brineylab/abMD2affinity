@@ -84,12 +84,21 @@ def read_rows(path):
 
 
 def queued_names():
-    """Names of my PENDING/RUNNING/CONFIGURING jobs that start with JOB_PREFIX."""
-    out = subprocess.run(
-        ["squeue", "-u", getpass.getuser(), "-h",
-         "-t", "PENDING,RUNNING,CONFIGURING", "-o", "%j"],
-        check=True, stdout=subprocess.PIPE, universal_newlines=True,
-    ).stdout
+    """Names of my PENDING/RUNNING/CONFIGURING jobs that start with JOB_PREFIX.
+
+    Returns None (with a warning) if squeue isn't available — e.g. a --dry-run
+    on a non-cluster box — so the queue pre-check degrades gracefully instead of
+    crashing. Callers treat None as "queue unknown".
+    """
+    try:
+        out = subprocess.run(
+            ["squeue", "-u", getpass.getuser(), "-h",
+             "-t", "PENDING,RUNNING,CONFIGURING", "-o", "%j"],
+            check=True, stdout=subprocess.PIPE, universal_newlines=True,
+        ).stdout
+    except FileNotFoundError:
+        print("WARN: squeue not found; skipping queue check", file=sys.stderr)
+        return None
     return {n for n in out.split() if n.startswith(JOB_PREFIX)}
 
 
@@ -221,6 +230,16 @@ def main():
     state = None if args.no_check_storage else storage_state()
     latest, completed = (None, None) if state is None else state
 
+    # queue pre-check: a system whose abmd_<run> job is already PENDING/RUNNING is
+    # in flight and must not be resubmitted. The babysitting loop below already
+    # enforces this per poll; snapshotting it here just lets the report and
+    # --dry-run show what will actually be skipped. Kept in `eligible` regardless
+    # so the loop can still resume it if it dies before reaching the target.
+    active = queued_names()          # set of abmd_* job names, or None if unknown
+
+    def in_queue(run):
+        return active is not None and f"{JOB_PREFIX}{run}" in active
+
     ready, partial = [], []      # completed 100 ns first, then partials
     for run in runs:
         if is_done(run):
@@ -233,22 +252,27 @@ def main():
         src = f" (from abmd_{run}_{latest[run]})" if latest else ""
         # unknown completion (no-check / md.gro list inconclusive) => assume ready
         is_complete = completed is None or run in completed
+        queued = " [already in queue — won't resubmit]" if in_queue(run) else ""
         if is_complete:
-            print(f"extend   {run}{src}")
+            print(f"extend   {run}{src}{queued}")
             ready.append(run)
         elif args.completed_only:
             print(f"PARTIAL  {run}{src}: 100 ns not finished (no md.gro), "
                   f"skipping (--completed-only)", file=sys.stderr)
         else:
-            print(f"extend   {run}{src} [partial 100 ns — no md.gro]")
+            print(f"extend   {run}{src} [partial 100 ns — no md.gro]{queued}")
             partial.append(run)
 
     eligible = ready + partial   # prefer completed runs: submit them first
 
+    n_queued = sum(1 for r in eligible if in_queue(r))
     if args.dry_run:
         extra = f", {len(partial)} of them from partial 100 ns runs" if partial else ""
+        queued_note = (f"; {n_queued} already in the queue (skipped), "
+                       f"{len(eligible) - n_queued} new submission(s)"
+                       if n_queued else "")
         print(f"\n{len(eligible)} systems would be extended to {args.target_ns} ns"
-              f"{extra} (cap={args.cap})")
+              f"{extra} (cap={args.cap}){queued_note}")
         return
 
     if not eligible:
@@ -261,7 +285,7 @@ def main():
 
     attempts = defaultdict(int)
     while True:
-        active = queued_names()
+        active = queued_names() or set()   # None (squeue missing) -> treat as empty
         pending = [r for r in eligible
                    if not is_done(r) and f"{JOB_PREFIX}{r}" not in active
                    and attempts[r] < args.max_attempts]
@@ -284,7 +308,7 @@ def main():
         # of attempts). Anything not done and not queued gets picked up next poll.
         remaining = [r for r in eligible if not is_done(r)]
         stuck = [r for r in remaining if attempts[r] >= args.max_attempts
-                 and f"{JOB_PREFIX}{r}" not in queued_names()]
+                 and f"{JOB_PREFIX}{r}" not in active]
         if not remaining:
             print(f"all systems reached {args.target_ns} ns")
             return
@@ -294,7 +318,7 @@ def main():
                   file=sys.stderr)
             return
 
-        n_active = len(queued_names())
+        n_active = len(active)
         print(f"[{datetime.now():%H:%M:%S}] queue at {n_active}/{args.cap}; "
               f"{len(remaining)} not yet at {args.target_ns} ns; "
               f"sleeping {args.interval}s")

@@ -30,12 +30,24 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
-# OpenGL/runtime bits PyMOL needs for headless (offscreen) rendering on nodes.
+# OpenGL/runtime bits PyMOL needs for headless (offscreen) rendering on nodes,
+# plus general-purpose CLI conveniences (curl / less / vim / zip).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 libegl1 libglu1-mesa \
         libxrender1 libxext6 libsm6 \
         libgomp1 ca-certificates procps \
+        curl less vim zip \
     && rm -rf /var/lib/apt/lists/*
+
+# s5cmd — fast parallel S3 mover, for staging inputs/results to/from object
+# storage. We use CoreWeave's fork (not upstream peak/s5cmd) via its .deb;
+# apt resolves any deps. amd64 only — arm64 hosts would need a different asset.
+ARG S5CMD_VERSION=2.3.0-acb67716
+RUN curl -fsSL -o /tmp/s5cmd.deb \
+        "https://github.com/coreweave/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_linux_amd64.deb" \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends /tmp/s5cmd.deb \
+    && rm -rf /tmp/s5cmd.deb /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
 # Env "md": GROMACS (CUDA) + pdb2pqr + the workflow stack.
