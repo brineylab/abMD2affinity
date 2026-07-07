@@ -47,7 +47,7 @@
 #SBATCH --output=/mnt/home/%u/logs/%x_%A.out
 #SBATCH --error=/mnt/home/%u/logs/%x_%A.err
 # --- container -------------------------------------------------------------
-#SBATCH --container-image=/mnt/data/sferrier/containers/abmd2affinity.sqsh
+#SBATCH --container-image=/mnt/data/sferrier/containers/abmd2affinity2.sqsh
 #SBATCH --container-mounts=/mnt/home/${SLURM_JOB_USER}:/mnt/home/${SLURM_JOB_USER},/mnt/data:/mnt/data,/tmp:/tmp
 #SBATCH --no-container-mount-home
 

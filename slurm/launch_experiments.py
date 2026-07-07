@@ -75,9 +75,9 @@ def main():
     ap.add_argument("experiments_path", nargs="?",
                     default="data/completed_mutants.tsv",
                     help="mutants TSV (default: data/completed_mutants.tsv)")
-    ap.add_argument("--cap", type=int, default=80,
+    ap.add_argument("--cap", type=int, default=98,
                     help="max jobs in the queue at once (default: 80)")
-    ap.add_argument("--interval", type=int, default=60,
+    ap.add_argument("--interval", type=int, default=300,
                     help="seconds between queue-refill polls (default: 60)")
     ap.add_argument("--dry-run", action="store_true",
                     help="list what would be submitted; submit nothing")
