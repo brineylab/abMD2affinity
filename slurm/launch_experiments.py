@@ -120,6 +120,37 @@ def _s5_ls(pattern):
     return out.stdout.splitlines()
 
 
+def checkpoint_ns(src_prefix):
+    """Current simulation time (ns) of the md.cpt under s3 prefix `src_prefix`,
+    or None if it can't be read (s5cmd/gmx missing, download/parse failure).
+    Best-effort — used only to enrich --dry-run output. Downloads the small cpt
+    to a temp file and reads `t = <ps>` from `gmx dump -cp`."""
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix=".cpt", delete=False)
+    tmp.close()
+    try:
+        cp = subprocess.run(
+            ["s5cmd", "--endpoint-url", OBJ_ENDPOINT, "cp",
+             f"{src_prefix}/md.cpt", tmp.name],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+        )
+        if cp.returncode != 0:
+            return None
+        dump = subprocess.run(
+            ["gmx", "dump", "-cp", tmp.name],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True,
+        )
+        m = re.search(r"^t\s*=\s*([\d.eE+-]+)", dump.stdout, re.MULTILINE)
+        return float(m.group(1)) / 1000.0 if m else None
+    except (FileNotFoundError, ValueError):
+        return None
+    finally:
+        try:
+            os.remove(tmp.name)
+        except OSError:
+            pass
+
+
 def storage_state():
     """(latest, completed) or None if storage is unreachable.
       latest    : {sys: highest jobid with an md.cpt} — run to resume from.
@@ -210,19 +241,43 @@ def run_extend(args, runs):
         src = f" (from abmd_{run}_{latest[run]})" if latest else ""
         queued = " [in queue]" if in_queue(run) else ""
         if completed is None or run in completed:   # unknown completion => ready
-            print(f"extend   {run}{src}{queued}")
+            if not args.dry_run:   # dry-run prints a richer per-run block below
+                print(f"extend   {run}{src}{queued}")
             ready.append(run)
         elif args.completed_only:
             print(f"PARTIAL  {run}{src}: 100 ns not finished, skipping", file=sys.stderr)
         else:
-            print(f"extend   {run}{src} [partial]{queued}")
+            if not args.dry_run:
+                print(f"extend   {run}{src} [partial]{queued}")
             partial.append(run)
 
     eligible = ready + partial   # prefer completed runs
     if args.dry_run:
+        print()
+        partial_set = set(partial)
+        remaining_total = 0.0
+        n_unknown = 0
+        for run in eligible:
+            src = f"abmd_{run}_{latest[run]}" if latest else "?"
+            queued = " [in queue]" if in_queue(run) else ""
+            tag = " [partial]" if run in partial_set else ""
+            cur = checkpoint_ns(f"s3://{OBJ_BUCKET}/{getpass.getuser()}/{src}") \
+                if latest else None
+            if cur is None:
+                print(f"extend   {run}: from {src}, current length unknown"
+                      f" -> {args.target_ns} ns{tag}{queued}")
+                n_unknown += 1
+            else:
+                togo = max(0.0, args.target_ns - cur)
+                remaining_total += togo
+                print(f"extend   {run}: from {src} at {cur:.1f} ns"
+                      f" -> {args.target_ns} ns ({togo:.1f} ns to go){tag}{queued}")
         n_queued = sum(1 for r in eligible if in_queue(r))
+        note = f", {n_unknown} with unknown current length" if n_unknown else ""
         print(f"\n{len(eligible)} systems would be extended to {args.target_ns} ns "
-              f"(cap={args.cap}); {n_queued} already in queue")
+              f"(cap={args.cap}); {n_queued} already in queue{note}")
+        print(f"~{remaining_total:.0f} ns total remaining across "
+              f"{len(eligible) - n_unknown} readable systems")
         return
     if not eligible:
         print("nothing to extend")
