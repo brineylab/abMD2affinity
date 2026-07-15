@@ -23,6 +23,7 @@ import csv
 import getpass
 import os
 import re
+import struct
 import subprocess
 import sys
 import time
@@ -120,11 +121,29 @@ def _s5_ls(pattern):
     return out.stdout.splitlines()
 
 
+def _cpt_time_ns(data):
+    """Simulation time (ns) parsed straight from GROMACS checkpoint bytes, or
+    None. A .cpt stores the step as a big-endian int64 immediately followed by
+    the time `t` as a big-endian double; we don't need gmx to read them. Scan
+    (rather than hardcode an offset — it shifts with the version-string length)
+    for the first (step, t) pair that looks like real MD: a large step count and
+    a per-step dt of ~2 fs (accept 0.1 fs .. 20 fs)."""
+    for off in range(0, len(data) - 16):
+        step = struct.unpack_from(">q", data, off)[0]
+        if step < 1000 or step > 10**13:
+            continue
+        t = struct.unpack_from(">d", data, off + 8)[0]
+        if 0 < t <= 2e9 and 1e-4 <= t / step <= 2e-2:
+            return t / 1000.0
+    return None
+
+
 def checkpoint_ns(src_prefix):
     """Current simulation time (ns) of the md.cpt under s3 prefix `src_prefix`,
-    or None if it can't be read (s5cmd/gmx missing, download/parse failure).
-    Best-effort — used only to enrich --dry-run output. Downloads the small cpt
-    to a temp file and reads `t = <ps>` from `gmx dump -cp`."""
+    or None if it can't be read (s5cmd missing, download/parse failure). Reads
+    the checkpoint bytes directly (no gmx needed — the launcher runs on the
+    submit node, where gmx lives only inside the container). Best-effort, used
+    only to enrich --dry-run output. Downloads the small cpt to a temp file."""
     import tempfile
     tmp = tempfile.NamedTemporaryFile(suffix=".cpt", delete=False)
     tmp.close()
@@ -136,13 +155,9 @@ def checkpoint_ns(src_prefix):
         )
         if cp.returncode != 0:
             return None
-        dump = subprocess.run(
-            ["gmx", "dump", "-cp", tmp.name],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True,
-        )
-        m = re.search(r"^t\s*=\s*([\d.eE+-]+)", dump.stdout, re.MULTILINE)
-        return float(m.group(1)) / 1000.0 if m else None
-    except (FileNotFoundError, ValueError):
+        with open(tmp.name, "rb") as fh:
+            return _cpt_time_ns(fh.read())
+    except (FileNotFoundError, OSError):
         return None
     finally:
         try:
