@@ -270,9 +270,9 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("experiments_path", nargs="?", default="data/completed_mutants.tsv",
                     help="mutants TSV (default: data/completed_mutants.tsv)")
-    ap.add_argument("--cap", type=int, default=80, help="max queued jobs (default: 80)")
-    ap.add_argument("--interval", type=int, default=60,
-                    help="seconds between queue-refill polls (default: 60)")
+    ap.add_argument("--cap", type=int, default=98, help="max queued jobs (default: 98)")
+    ap.add_argument("--interval", type=int, default=300,
+                    help="seconds between queue-refill polls (default: 300)")
     ap.add_argument("--dry-run", action="store_true",
                     help="report what would be submitted; submit nothing")
     ext = ap.add_argument_group("extend mode")
@@ -281,8 +281,8 @@ def main():
                           "starting fresh 100 ns runs")
     ext.add_argument("--target-ns", type=int, default=500,
                      help="total length to reach, ns (default: 500)")
-    ext.add_argument("--max-attempts", type=int, default=6,
-                     help="max resubmits per system before giving up (default: 6)")
+    ext.add_argument("--max-attempts", type=int, default=1,
+                     help="max resubmits per system before giving up (default: 1)")
     ext.add_argument("--once", action="store_true",
                      help="submit a single wave and exit")
     ext.add_argument("--completed-only", action="store_true",
