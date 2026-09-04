@@ -1,18 +1,16 @@
-# AB-Bind-specific inputs for the abbind_scripts/ generators.
+# AB-Bind-specific configuration for the mutant_binding_affinity/ generators.
+# Relative paths resolve against this file's directory.
 #
-# These scripts turn the raw AB-Bind dataset into the pipeline's generic
-# structures list:
+#   python build_mutants_tsv.py abbind.yaml
+#       raw dataset -> data/mutants.tsv (one row per pdb_id/mutant, filtered
+#       to the structures below)
 #
-#   python abbind_scripts/build_mutants_tsv.py abbind_scripts/abbind.yaml
-#       raw dataset -> mutants TSV (one row per pdb_id/mutant, filtered to the
-#       structures below)
+#   python build_structures.py abbind.yaml
+#       mutants TSV -> mutant PDBs in mutants/ (PyMOL) + structures_abbind.yaml
+#       (the structures list run_MD consumes):
 #
-#   python abbind_scripts/build_structures.py abbind_scripts/abbind.yaml
-#       mutants TSV -> materialised mutant PDBs (PyMOL) + a structures list
-#       (one entry per WT/mutant system), then run the pipeline with:
-#
-#   snakemake --configfile config.yaml \
-#       --config structures_file=structures_abbind.yaml ...
+#   cd ../run_MD && snakemake --configfile config.yaml \
+#       --config structures_file=../mutant_binding_affinity/structures_abbind.yaml
 
 # Raw AB-Bind dataset and the derived mutants TSV (build_mutants_tsv.py).
 raw_tsv: "data/PRO-25-393-s002.tsv"
@@ -21,7 +19,7 @@ mutants_tsv: "data/mutants.tsv"
 # Generic structures list + mutant PDBs written by build_structures.py, and
 # the PyMOL interpreter used to apply the mutations (container env layout).
 structures_out: "structures_abbind.yaml"
-mutants_dir: "data/abbind_mutants"
+mutants_dir: "mutants"
 pymol_python_bin: "/opt/conda/envs/pymol/bin/python"
 
 # Per-PDB map. Each key is a pdb_id (== structure filename stem); its first 4

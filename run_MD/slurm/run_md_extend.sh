@@ -8,8 +8,10 @@
 # trajectory that run_md.sh already uploaded.
 #
 # Args (passed by launch_experiments.py --extend):
-#   $1  system name     e.g. 1bj1fv_WT — the {system} used in dir names
-#   $2  target_ns      (optional) total simulation length in ns; default 500
+#   $1  system name     e.g. 1bj1fv_WT — for job naming/logs only
+#   $2  output dir      the system's directory from the manifest; the done
+#                      marker and log copy are written there
+#   $3  target_ns      (optional) total simulation length in ns; default 500
 #
 # What it does, entirely on local /tmp scratch:
 #   1. Discover the most-advanced trajectory for this system in object storage.
@@ -25,7 +27,7 @@
 #      loses at most one sync interval) and once more at exit. A 400 ns
 #      extension will not fit in one job's wall time; when the launcher
 #      re-submits, step 1 finds this job's partial (higher jobid) and resumes.
-#   5. On reaching the target, write results/launch_extend/done/<sys>.log on
+#   5. On reaching the target, write the done marker (<output_dir>/extend.done)
 #      shared storage — the launcher's "done, don't resubmit" flag.
 #
 # GPU note: identical to run_md.sh — the CUDA driver is injected by enroot's
@@ -52,8 +54,9 @@
 
 set -euo pipefail
 
-SYS="${1:?usage: run_md_extend.sh <system> [target_ns]}"
-TARGET_NS="${2:-500}"
+SYS="${1:?usage: run_md_extend.sh <system> <output_dir> [target_ns]}"
+OUTDIR="${2:?usage: run_md_extend.sh <system> <output_dir> [target_ns]}"
+TARGET_NS="${3:-500}"
 UNTIL_PS=$(( TARGET_NS * 1000 ))
 
 # object-storage coordinates; override via env. Defaults to http://cwlota.com,
@@ -64,7 +67,7 @@ UNTIL_PS=$(( TARGET_NS * 1000 ))
 OBJ_ENDPOINT="${OBJ_ENDPOINT:-http://cwlota.com}"
 OBJ_BUCKET="${OBJ_BUCKET:-brineylab-us-east}"
 
-PROJECT_DIR="${SLURM_SUBMIT_DIR}"
+PROJECT_DIR="${SLURM_SUBMIT_DIR}"   # repo checkout (for the container image)
 THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
 # env file: creates JOB_WORK_DIR on local /tmp, sets object-storage keys, and
@@ -144,22 +147,21 @@ trap - EXIT
 push_checkpoint
 
 # Keep a lightweight copy of the log on shared storage for quick inspection.
-mkdir -p "${PROJECT_DIR}/results/launch_extend/logs"
-cp -f md.log "${PROJECT_DIR}/results/launch_extend/logs/${SYS}.md.log" || true
+mkdir -p "${OUTDIR}/MD"
+cp -f md.log "${OUTDIR}/MD/md.log" || true
 
 if [ "$RC" -ne 0 ]; then
     echo "[$(date)] ${SYS}: mdrun exited ${RC} (likely wall-time / requeue); partial synced to ${SELF_PREFIX}/, re-submit to resume" >&2
     exit "$RC"
 fi
 
-# --- 4. reached target: mark done on shared storage ------------------------
-mkdir -p "${PROJECT_DIR}/results/launch_extend/done"
+# --- 4. reached target: mark done in the system's output dir ----------------
 {
     echo "sys: ${SYS}"
     echo "target_ns: ${TARGET_NS}"
     echo "finished: $(date -Iseconds)"
     echo "final_prefix: ${SELF_PREFIX}/"
     echo "resumed_from: ${SRC}/"
-} > "${PROJECT_DIR}/results/launch_extend/done/${SYS}.log"
+} > "${OUTDIR}/extend.done"
 
 echo "[$(date)] ${SYS}: reached ${TARGET_NS} ns; full trajectory at ${SELF_PREFIX}/"

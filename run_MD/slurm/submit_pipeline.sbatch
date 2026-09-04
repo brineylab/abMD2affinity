@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# submit_pipeline.sbatch — run the MD2affinity pipeline via Snakemake's Slurm
-# executor plugin (snakemake-executor-plugin-slurm).
+# submit_pipeline.sbatch — run the MD pipeline via Snakemake's Slurm executor
+# plugin (snakemake-executor-plugin-slurm).
 #
 # Model: this sbatch launches a lightweight Snakemake *controller* (1 CPU, small
 # memory). The controller does NOT run any science itself — it submits each rule
@@ -21,9 +21,9 @@
 #     (e.g. Snakemake `--use-apptainer` with a `container:` directive, or module
 #     loads) — the Slurm executor runs each rule's shell on a bare compute node.
 #
-# Usage: sbatch slurm/submit_pipeline.sbatch [extra snakemake targets/args...]
-#   e.g. production-only against a specific structures list:
-#     sbatch slurm/submit_pipeline.sbatch --config structures_file=structures_abbind.yaml
+# Usage (from run_MD/): sbatch slurm/submit_pipeline.sbatch [extra snakemake args...]
+#   e.g. against a specific structures list:
+#     sbatch slurm/submit_pipeline.sbatch --config structures_file=/path/to/structures.yaml
 
 #SBATCH --job-name=md2affinity-ctl
 #SBATCH --partition=cpu

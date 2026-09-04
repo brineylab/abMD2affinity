@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 build_mutants_tsv.py — Derive the (pdb_id, mutant) TSV from the raw AB-Bind
-dataset (data/PRO-25-393-s002.tsv), one block of rows per entry in the
-`structures` map of abbind_scripts/abbind.yaml.
+dataset, one block of rows per entry in the `structures` map of abbind.yaml.
 
 Each structures key is a pdb_id (e.g. 1dqjfv, 1dqjfab); its first 4 characters
 are the dataset code looked up in the raw TSV's "#PDB" column. So a fab/fv
@@ -14,7 +13,7 @@ antibody, real letters for antigen); the H/L -> real chain remapping happens
 in build_structures.py via each structure's chain_map.
 
 Usage:
-    python abbind_scripts/build_mutants_tsv.py abbind_scripts/abbind.yaml
+    python build_mutants_tsv.py abbind.yaml
 """
 
 import argparse
@@ -44,16 +43,18 @@ def mutants_by_code(raw_tsv: Path) -> dict[str, list[str]]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("config", help="abbind_scripts/abbind.yaml")
+    ap.add_argument("config", help="abbind.yaml (relative paths resolve against it)")
     ap.add_argument("-o", "--out", default=None,
                     help="output TSV (default: the config's mutants_tsv)")
     args = ap.parse_args()
 
-    cfg = yaml.safe_load(open(args.config))
+    cfg_path = Path(args.config).resolve()
+    cfg = yaml.safe_load(open(cfg_path))
+    base = cfg_path.parent
     structures = cfg["structures"]
-    out_path = args.out or cfg["mutants_tsv"]
+    out_path = Path(args.out) if args.out else base / cfg["mutants_tsv"]
 
-    by_code = mutants_by_code(Path(cfg["raw_tsv"]))
+    by_code = mutants_by_code(base / cfg["raw_tsv"])
 
     rows: list[tuple[str, str]] = []
     for pdb_id in structures:
@@ -69,6 +70,7 @@ def main() -> None:
     if not rows:
         sys.exit("No rows produced — check the structures map and dataset codes.")
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f, delimiter="\t", lineterminator="\n")
         w.writerow(["pdb_id", "mutant"])

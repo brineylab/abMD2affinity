@@ -1,0 +1,24 @@
+# Structures to run MD on — the pipeline's input list.
+#
+# base_dir    anchor for all outputs (relative paths resolve against this
+#             file's directory)
+# output_dir  optional — replaces "results" in the default output location:
+#             outputs go to {base_dir}/{output_dir}/{name}/
+#
+# Each entry takes:
+#   name       system name — default output dir is {base_dir}/results/{name}/
+#   path       input PDB (relative paths resolve against this file's directory)
+#   output_dir optional — per-structure output dir (relative -> under base_dir)
+#   chains     optional — chains to keep (default: every chain in the file)
+#   md_ns /    optional — per-structure production-MD length, overriding the
+#   md_steps   global md_ns / md_steps in config.yaml (at most one of the two)
+base_dir: "."
+structures:
+  - name: example
+    path: example_structure.pdb
+
+  # Same structure, but 500 ns and its own output dir:
+  # - name: example_500ns
+  #   path: example_structure.pdb
+  #   output_dir: long_runs/example_500ns
+  #   md_ns: 500

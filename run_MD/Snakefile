@@ -14,41 +14,34 @@
 #     -> NPT equilibration (100 ps)
 #     -> production MD (md_ns / md_steps, GPU)         } production MD
 #
+# Run from this directory (run_MD/):
+#   snakemake --configfile config.yaml -n                       # dry-run
+#   snakemake --configfile config.yaml --cores 32 --resources gpu=<n>
+#   snakemake --configfile config.yaml --cores 8 --resources gpu=1 \
+#       <output_dir>/MD/<system>/md.gro                         # single system
+#
 # Input:
-#   - a structures list (config key `structures_file`, default structures.yaml,
-#     or an inline `structures:` list in config.yaml): one entry per structure
-#     to run MD on ({name, path}, with optional per-structure `chains` and an
-#     optional `md_ns`/`md_steps` that overrides the global default).
-#     See scripts/build_systems.py.
-#   - config["md_ns"] or config["md_steps"]: default production-MD length;
-#     the base .mdp's `nsteps` is rewritten per system (rule write_md_mdp).
+#   - config.yaml: parameters. `output_dir` is the object-storage destination
+#     the preprocessing tree is synced to (rule sync_preprocessing); blank
+#     skips the sync.
+#   - a structures file (config key `structures_file`, default structures.yaml):
+#     top-level `base_dir` (+ optional top-level `output_dir` replacing
+#     "results") and one {name, path} entry per structure to run MD on, with
+#     optional per-structure `chains`, `output_dir` and `md_ns`/`md_steps`
+#     (overrides the global default). See scripts/build_systems.py.
 #
-# Output layout (under config["output_dir"], default "results/"):
-#   preprocessing/{system}/   — chain extraction through NPT equilibration
-#   MD/{system}/              — production MD only
-#   params/{system}/md.mdp    — production .mdp with that system's length
-#   manifest.json             — parsed system manifest (audit)
-#
-# A sync gate (rule sync_preprocessing) copies the entire preprocessing/ tree
-# to object storage via `s5cmd sync` once every requested system has reached
-# npt.gro. Every production_md job depends on that sync completing, so no
-# production run starts until the full preprocessing batch is archived.
-# Set config["s5cmd_dest"] = "" to skip the sync (production starts immediately).
+# Output layout — each system gets its own directory (default
+# {base_dir}/results/{name}/, overridable per structure):
+#   {system_dir}/preprocessing/   — chain extraction through NPT equilibration
+#   {system_dir}/MD/              — production MD (md.mdp, md.tpr, md.gro, ...)
+#   {system_dir}/movie.mp4        — trajectory movie (rule movie)
+#   {results_root}/manifest.json  — parsed system manifest (audit)
 #
 # GPU: openmm_minimize and production_md each request 1 GPU (resources: gpu=1).
 # Launch under Slurm so each job is allocated its own GPU; GROMACS/OpenMM pick
 # up the allocated device via CUDA_VISIBLE_DEVICES.
-#
-# Run (local):
-#   snakemake --configfile config.yaml --cores 32 --resources gpu=<n_gpus>
-# Dry-run:
-#   snakemake --configfile config.yaml -n
-# Single system:
-#   snakemake --configfile config.yaml --cores 8 --resources gpu=1 \
-#       results/MD/1bj1fv/md.gro
-# Slurm:
-#   sbatch slurm/submit_pipeline.sbatch
 
+import re
 import sys
 from pathlib import Path
 
@@ -57,11 +50,6 @@ from build_systems import build_systems, load_structures
 
 configfile: "config.yaml"
 
-OUT    = Path(config["output_dir"])
-PRE    = OUT / "preprocessing"
-MD     = OUT / "MD"
-MOVIES = OUT / "movies"
-
 CPU_THREADS = int(config.get("cpu_threads", 8))
 
 PDB2PQR        = config.get("pdb2pqr_bin", "pdb2pqr")
@@ -69,7 +57,7 @@ GMX_PYTHON     = config.get("gmx_python_bin", "python3")
 PYMOL_PYTHON   = config.get("pymol_python_bin", "python")
 OPENMM_PYTHON  = config.get("openmm_python_bin", "python")
 S5CMD          = config.get("s5cmd_bin", "s5cmd")
-S5CMD_DEST     = config.get("s5cmd_dest", "")
+OUTPUT_DEST    = config.get("output_dir", "").rstrip("/")  # object-storage sync destination
 MDP_MD_BASE    = config.get("mdp_md", "mdp/md.mdp")
 
 MAKE_MOVIE     = config.get("make_movie", True)
@@ -77,47 +65,50 @@ if isinstance(MAKE_MOVIE, str):
     MAKE_MOVIE = MAKE_MOVIE.strip().lower() not in ("false", "0", "no", "off", "")
 
 # One MD system per structures-list entry. Each carries exactly one of
-# md_ns / md_steps (per-structure override, else the global default from
-# config.yaml); build_systems raises if any system ends up with neither.
-SYSTEMS = build_systems(
+# md_ns / md_steps (per-structure override, else the global default) and its
+# own output_dir; build_systems raises if any system ends up with neither
+# length.
+SYSTEMS, RESULTS_ROOT = build_systems(
     load_structures(config),
     default_md_ns=config.get("md_ns"),
     default_md_steps=config.get("md_steps"),
 )
 if not SYSTEMS:
     raise ValueError("No systems parsed — check the structures list.")
-SYSTEM_NAMES = list(SYSTEMS)
 
-# {system} is the manifest key — validated in build_systems to be a single
-# filesystem-safe path segment, so it can never escape the output tree.
+# Every rule output lives under a system's output dir, so the dir itself is the
+# wildcard ({sysdir}). Constrain it to the exact set of system dirs (like a
+# lookup table) so wildcard matching never picks up unrelated files, and make
+# sure no two systems share one.
+from collections import Counter
+_dupes = [d for d, n in Counter(v["output_dir"] for v in SYSTEMS.values()).items()
+          if n > 1]
+if _dupes:
+    raise ValueError(f"systems share an output_dir: {sorted(_dupes)}")
+OUT2SYS = {v["output_dir"]: k for k, v in SYSTEMS.items()}
 wildcard_constraints:
-    system = r"[A-Za-z0-9][A-Za-z0-9._-]*",
+    sysdir = "(?:" + "|".join(re.escape(d) for d in OUT2SYS) + ")",
+
+SYSTEM_DIRS = list(OUT2SYS)
 
 
 def sys_data(wc) -> dict:
-    return SYSTEMS[wc.system]
-
-
-def md_length_args(system: str) -> str:
-    """--ns/--steps argument for a system's production length."""
-    entry = SYSTEMS[system]
-    return (f"--ns {entry['md_ns']}" if entry["md_ns"] is not None
-            else f"--steps {entry['md_steps']}")
+    return SYSTEMS[OUT2SYS[wc.sysdir]]
 
 
 # ---------------------------------------------------------------------------
 # Target
 # ---------------------------------------------------------------------------
 
-_TARGETS = [str(MD / s / "md.gro") for s in SYSTEM_NAMES]
+_TARGETS = [f"{d}/MD/md.gro" for d in SYSTEM_DIRS]
 if MAKE_MOVIE:
-    _TARGETS += [str(MOVIES / f"{s}.mp4") for s in SYSTEM_NAMES]
+    _TARGETS += [f"{d}/movie.mp4" for d in SYSTEM_DIRS]
 
 
 rule all:
     input:
         _TARGETS,
-        str(OUT / "manifest.json"),
+        str(RESULTS_ROOT / "manifest.json"),
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +117,7 @@ rule all:
 
 rule write_manifest:
     output:
-        json = str(OUT / "manifest.json"),
+        json = str(RESULTS_ROOT / "manifest.json"),
     run:
         import json
         with open(output.json, "w") as fh:
@@ -142,11 +133,13 @@ rule write_md_mdp:
     input:
         base = MDP_MD_BASE,
     output:
-        mdp = str(OUT / "params" / "{system}" / "md.mdp"),
+        mdp = "{sysdir}/MD/md.mdp",
     params:
-        length = lambda wc: md_length_args(wc.system),
+        length = lambda wc: (
+            f"--ns {sys_data(wc)['md_ns']}" if sys_data(wc)["md_ns"] is not None
+            else f"--steps {sys_data(wc)['md_steps']}"),
     log:
-        str(OUT / "params" / "{system}" / "write_md_mdp.log"),
+        "{sysdir}/MD/logs/write_md_mdp.log",
     shell:
         """
         {GMX_PYTHON} scripts/make_md_mdp.py \
@@ -163,11 +156,11 @@ rule extract_chains:
     input:
         pdb = lambda wc: sys_data(wc)["pdb_file"],
     output:
-        pdb = str(PRE / "{system}" / "extracted.pdb"),
+        pdb = "{sysdir}/preprocessing/extracted.pdb",
     params:
         chains = lambda wc: " ".join(sys_data(wc)["chains"]),
     log:
-        str(PRE / "{system}" / "logs" / "extract_chains.log"),
+        "{sysdir}/preprocessing/logs/extract_chains.log",
     shell:
         """
         {GMX_PYTHON} scripts/extract_chains.py \
@@ -182,13 +175,13 @@ rule extract_chains:
 
 rule openmm_minimize:
     input:
-        pdb = str(PRE / "{system}" / "extracted.pdb"),
+        pdb = "{sysdir}/preprocessing/extracted.pdb",
     output:
-        pdb = str(PRE / "{system}" / "minimized.pdb"),
+        pdb = "{sysdir}/preprocessing/minimized.pdb",
     resources:
         gpu = 1,
     log:
-        str(PRE / "{system}" / "logs" / "openmm_minimize.log"),
+        "{sysdir}/preprocessing/logs/openmm_minimize.log",
     shell:
         """
         {OPENMM_PYTHON} scripts/minimize_openmm.py \
@@ -203,12 +196,12 @@ rule openmm_minimize:
 
 rule pdb2pqr:
     input:
-        pdb = str(PRE / "{system}" / "minimized.pdb"),
+        pdb = "{sysdir}/preprocessing/minimized.pdb",
     output:
-        pdb = str(PRE / "{system}" / "protonated.pdb"),
-        pqr = str(PRE / "{system}" / "protonated.pqr"),
+        pdb = "{sysdir}/preprocessing/protonated.pdb",
+        pqr = "{sysdir}/preprocessing/protonated.pqr",
     log:
-        str(PRE / "{system}" / "logs" / "pdb2pqr.log"),
+        "{sysdir}/preprocessing/logs/pdb2pqr.log",
     shell:
         """
         {PDB2PQR} \
@@ -227,12 +220,12 @@ rule pdb2pqr:
 
 rule pdb2gmx:
     input:
-        pdb = str(PRE / "{system}" / "protonated.pdb"),
+        pdb = "{sysdir}/preprocessing/protonated.pdb",
     output:
-        gro = str(PRE / "{system}" / "protein.gro"),
-        top = str(PRE / "{system}" / "topol_base.top"),
+        gro = "{sysdir}/preprocessing/protein.gro",
+        top = "{sysdir}/preprocessing/topol_base.top",
     log:
-        str(PRE / "{system}" / "logs" / "pdb2gmx.log"),
+        "{sysdir}/preprocessing/logs/pdb2gmx.log",
     shell:
         """
         ROOT=$(pwd)
@@ -254,11 +247,11 @@ rule pdb2gmx:
 
 rule editconf:
     input:
-        gro = str(PRE / "{system}" / "protein.gro"),
+        gro = "{sysdir}/preprocessing/protein.gro",
     output:
-        gro = str(PRE / "{system}" / "boxed.gro"),
+        gro = "{sysdir}/preprocessing/boxed.gro",
     log:
-        str(PRE / "{system}" / "logs" / "editconf.log"),
+        "{sysdir}/preprocessing/logs/editconf.log",
     shell:
         """
         printf 'Protein\n' | gmx editconf \
@@ -275,13 +268,13 @@ rule editconf:
 
 rule solvate:
     input:
-        gro = str(PRE / "{system}" / "boxed.gro"),
-        top = str(PRE / "{system}" / "topol_base.top"),
+        gro = "{sysdir}/preprocessing/boxed.gro",
+        top = "{sysdir}/preprocessing/topol_base.top",
     output:
-        gro = str(PRE / "{system}" / "solvated.gro"),
-        top = str(PRE / "{system}" / "topol_solv.top"),
+        gro = "{sysdir}/preprocessing/solvated.gro",
+        top = "{sysdir}/preprocessing/topol_solv.top",
     log:
-        str(PRE / "{system}" / "logs" / "solvate.log"),
+        "{sysdir}/preprocessing/logs/solvate.log",
     shell:
         """
         cp {input.top} {output.top}
@@ -300,15 +293,15 @@ rule solvate:
 
 rule genion:
     input:
-        gro = str(PRE / "{system}" / "solvated.gro"),
-        top = str(PRE / "{system}" / "topol_solv.top"),
+        gro = "{sysdir}/preprocessing/solvated.gro",
+        top = "{sysdir}/preprocessing/topol_solv.top",
         mdp = "mdp/em_strong.mdp",
     output:
-        gro = str(PRE / "{system}" / "ions.gro"),
-        top = str(PRE / "{system}" / "topol_ions.top"),
-        tpr = str(PRE / "{system}" / "ions.tpr"),
+        gro = "{sysdir}/preprocessing/ions.gro",
+        top = "{sysdir}/preprocessing/topol_ions.top",
+        tpr = "{sysdir}/preprocessing/ions.tpr",
     log:
-        str(PRE / "{system}" / "logs" / "genion.log"),
+        "{sysdir}/preprocessing/logs/genion.log",
     shell:
         """
         cp {input.top} {output.top}
@@ -337,15 +330,15 @@ rule genion:
 
 rule gromacs_em:
     input:
-        gro = str(PRE / "{system}" / "ions.gro"),
-        top = str(PRE / "{system}" / "topol_ions.top"),
+        gro = "{sysdir}/preprocessing/ions.gro",
+        top = "{sysdir}/preprocessing/topol_ions.top",
         mdp = "mdp/em_strong.mdp",
     output:
-        gro = str(PRE / "{system}" / "em.gro"),
-        tpr = str(PRE / "{system}" / "em.tpr"),
+        gro = "{sysdir}/preprocessing/em.gro",
+        tpr = "{sysdir}/preprocessing/em.tpr",
     threads: CPU_THREADS
     log:
-        str(PRE / "{system}" / "logs" / "em.log"),
+        "{sysdir}/preprocessing/logs/em.log",
     shell:
         """
         ROOT=$(pwd)
@@ -370,16 +363,16 @@ rule gromacs_em:
 
 rule nvt:
     input:
-        gro = str(PRE / "{system}" / "em.gro"),
-        top = str(PRE / "{system}" / "topol_ions.top"),
+        gro = "{sysdir}/preprocessing/em.gro",
+        top = "{sysdir}/preprocessing/topol_ions.top",
         mdp = "mdp/nvt.mdp",
     output:
-        gro = str(PRE / "{system}" / "nvt.gro"),
-        cpt = str(PRE / "{system}" / "nvt.cpt"),
-        tpr = str(PRE / "{system}" / "nvt.tpr"),
+        gro = "{sysdir}/preprocessing/nvt.gro",
+        cpt = "{sysdir}/preprocessing/nvt.cpt",
+        tpr = "{sysdir}/preprocessing/nvt.tpr",
     threads: CPU_THREADS
     log:
-        str(PRE / "{system}" / "logs" / "nvt.log"),
+        "{sysdir}/preprocessing/logs/nvt.log",
     shell:
         """
         ROOT=$(pwd)
@@ -408,17 +401,17 @@ rule nvt:
 
 rule npt:
     input:
-        gro = str(PRE / "{system}" / "nvt.gro"),
-        cpt = str(PRE / "{system}" / "nvt.cpt"),
-        top = str(PRE / "{system}" / "topol_ions.top"),
+        gro = "{sysdir}/preprocessing/nvt.gro",
+        cpt = "{sysdir}/preprocessing/nvt.cpt",
+        top = "{sysdir}/preprocessing/topol_ions.top",
         mdp = "mdp/npt.mdp",
     output:
-        gro = str(PRE / "{system}" / "npt.gro"),
-        cpt = str(PRE / "{system}" / "npt.cpt"),
-        tpr = str(PRE / "{system}" / "npt.tpr"),
+        gro = "{sysdir}/preprocessing/npt.gro",
+        cpt = "{sysdir}/preprocessing/npt.cpt",
+        tpr = "{sysdir}/preprocessing/npt.tpr",
     threads: CPU_THREADS
     log:
-        str(PRE / "{system}" / "logs" / "npt.log"),
+        "{sysdir}/preprocessing/logs/npt.log",
     shell:
         """
         ROOT=$(pwd)
@@ -440,27 +433,34 @@ rule npt:
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint — sync the full preprocessing/ tree to object storage once every
-# requested system has reached npt.gro. Every production_md job waits on this.
-# Fill in config["s5cmd_dest"] before running; leave blank to skip the sync.
+# Checkpoint — sync every system's preprocessing/ tree to object storage once
+# it has reached npt.gro (and only when every system has). Every production_md
+# job waits on this. config.yaml `output_dir` is the destination; blank = skip.
 # ---------------------------------------------------------------------------
 
 rule sync_preprocessing:
     input:
-        [str(PRE / s / "npt.gro") for s in SYSTEM_NAMES],
+        [f"{v['output_dir']}/preprocessing/npt.gro" for v in SYSTEMS.values()],
     output:
-        touch(str(OUT / "preprocessing.synced")),
+        touch(str(RESULTS_ROOT / "preprocessing.synced")),
     params:
-        dest = S5CMD_DEST,
-        src  = str(PRE) + "/",
+        dest  = OUTPUT_DEST,
+        pairs = "\n".join(f"{v['output_dir']}/preprocessing {k}"
+                         for k, v in SYSTEMS.items()),
     log:
-        str(OUT / "logs" / "sync_preprocessing.log"),
+        str(RESULTS_ROOT / "logs" / "sync_preprocessing.log"),
     shell:
         """
+        mkdir -p $(dirname {log})
         if [ -z "{params.dest}" ]; then
-            echo "s5cmd_dest not set in config.yaml — skipping object-storage sync" | tee {log}
+            echo "output_dir not set in config.yaml — skipping object-storage sync" | tee {log}
         else
-            {S5CMD} sync {params.src} {params.dest} > {log} 2>&1
+            while read -r src name; do
+                [ -n "$src" ] || continue
+                {S5CMD} sync "$src/" "{params.dest}/$name/preprocessing/" >> {log} 2>&1
+            done <<'PAIRS'
+{params.pairs}
+PAIRS
         fi
         """
 
@@ -471,20 +471,20 @@ rule sync_preprocessing:
 
 rule production_md:
     input:
-        gro    = str(PRE / "{system}" / "npt.gro"),
-        cpt    = str(PRE / "{system}" / "npt.cpt"),
-        top    = str(PRE / "{system}" / "topol_ions.top"),
-        mdp    = str(OUT / "params" / "{system}" / "md.mdp"),
-        synced = str(OUT / "preprocessing.synced"),
+        gro    = "{sysdir}/preprocessing/npt.gro",
+        cpt    = "{sysdir}/preprocessing/npt.cpt",
+        top    = "{sysdir}/preprocessing/topol_ions.top",
+        mdp    = "{sysdir}/MD/md.mdp",
+        synced = str(RESULTS_ROOT / "preprocessing.synced"),
     output:
-        gro = str(MD / "{system}" / "md.gro"),
-        xtc = str(MD / "{system}" / "md.xtc"),
-        tpr = str(MD / "{system}" / "md.tpr"),
+        gro = "{sysdir}/MD/md.gro",
+        xtc = "{sysdir}/MD/md.xtc",
+        tpr = "{sysdir}/MD/md.tpr",
     threads: CPU_THREADS
     resources:
         gpu = 1,
     log:
-        str(MD / "{system}" / "logs" / "md.log"),
+        "{sysdir}/MD/logs/md.log",
     shell:
         """
         ROOT=$(pwd)
@@ -526,15 +526,15 @@ rule production_md:
 
 rule movie:
     input:
-        xtc = str(MD / "{system}" / "md.xtc"),
-        tpr = str(MD / "{system}" / "md.tpr"),
+        xtc = "{sysdir}/MD/md.xtc",
+        tpr = "{sysdir}/MD/md.tpr",
     output:
-        mp4 = str(MOVIES / "{system}.mp4"),
+        mp4 = "{sysdir}/movie.mp4",
     params:
         skip = int(config.get("movie_skip", 1)),
         fps  = int(config.get("movie_fps", 15)),
     log:
-        str(MD / "{system}" / "logs" / "movie.log"),
+        "{sysdir}/MD/logs/movie.log",
     shell:
         """
         MP4="{output.mp4}"

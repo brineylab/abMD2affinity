@@ -1,27 +1,31 @@
 #!/usr/bin/env python
-"""Submit production-MD jobs, one per prepped system, keeping at most --cap
-jobs in the Slurm queue at once. Run on the login/submit node.
+"""Submit production-MD jobs, one per system in the pipeline's manifest.json,
+keeping at most --cap jobs in the Slurm queue at once. Run on the login/submit
+node.
+
+The manifest is written by the pipeline itself (rule write_manifest) and maps
+every system to its output dir, so this launcher stays in sync with whatever
+the pipeline has produced.
 
 Default (fresh): submit a production run (slurm/run_md.sh) for every system
-that has finished preprocessing (results/preprocessing/<system>/npt.gro),
-skipping systems already marked in results/launch/. One pass, then exit.
-Pass a file with one system name per line to submit only a subset.
+whose preprocessing is done ({output_dir}/preprocessing/npt.gro), skipping
+systems already marked ({output_dir}/launch.submitted). One pass, then exit.
 
 --extend: continue each system's existing trajectory (in object storage) up to
 --target-ns via slurm/run_md_extend.sh, babysitting the queue and resubmitting
-until every system writes its results/launch_extend/done/<system>.log marker.
-Needs s5cmd + the storage keys for the pre-check; systems whose production run
-finished (md.gro present) are submitted before partial ones.
+until every system writes its {output_dir}/extend.done marker. Needs s5cmd +
+the storage keys for the pre-check; systems whose production run finished
+(md.gro present) are submitted before partial ones.
 
-    python slurm/launch_experiments.py [--cap N]
-    python slurm/launch_experiments.py systems.txt
-    python slurm/launch_experiments.py --extend [--target-ns 500] [--completed-only]
+    python slurm/launch_experiments.py <manifest.json> [--cap N]
+    python slurm/launch_experiments.py <manifest.json> --extend [--target-ns 500]
 
 --dry-run reports what it would do and submits nothing.
 """
 
 import argparse
 import getpass
+import json
 import os
 import re
 import struct
@@ -35,9 +39,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 RUN_SCRIPT = os.path.join(HERE, "run_md.sh")
 RUN_EXTEND_SCRIPT = os.path.join(HERE, "run_md_extend.sh")
-MARKER_DIR = os.path.join(REPO, "results", "launch")
-PRE_DIR = os.path.join(REPO, "results", "preprocessing")
-DONE_DIR = os.path.join(REPO, "results", "launch_extend", "done")
 JOB_PREFIX = "abmd_"   # only jobs named with this count toward --cap
 
 # Object storage. The extend pre-check only lists (read-only), so default to the
@@ -47,19 +48,14 @@ OBJ_ENDPOINT = os.environ.get("OBJ_ENDPOINT", "https://cwobject.com")
 OBJ_BUCKET = os.environ.get("OBJ_BUCKET", "brineylab-us-east")
 
 
-def prepped_systems():
-    """Systems with a finished preprocessing dir (npt.gro present)."""
-    out = []
-    if os.path.isdir(PRE_DIR):
-        for name in sorted(os.listdir(PRE_DIR)):
-            if os.path.isfile(os.path.join(PRE_DIR, name, "npt.gro")):
-                out.append(name)
-    return out
-
-
-def named_systems(path):
+def load_manifest(path):
+    """{system: {output_dir, ...}} from the pipeline's manifest.json."""
     with open(path) as fh:
-        return [line.strip() for line in fh if line.strip()]
+        manifest = json.load(fh)
+    out = {}
+    for name, entry in manifest.items():
+        out[name] = entry["output_dir"]
+    return out
 
 
 def queued_names():
@@ -76,20 +72,16 @@ def queued_names():
     return {n for n in out.split() if n.startswith(JOB_PREFIX)}
 
 
-def submit(system, target_ns=None):
+def submit(system, out_dir, target_ns=None):
     """sbatch run_md.sh (fresh) or run_md_extend.sh (extend); return the job id."""
     cmd = ["sbatch", f"--job-name={JOB_PREFIX}{system}"]
-    cmd += [RUN_SCRIPT, system] if target_ns is None \
-        else [RUN_EXTEND_SCRIPT, system, str(target_ns)]
+    cmd += [RUN_SCRIPT, system, out_dir] if target_ns is None \
+        else [RUN_EXTEND_SCRIPT, system, out_dir, str(target_ns)]
     out = subprocess.run(
         cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         universal_newlines=True,
     ).stdout.strip()
     return out.split()[-1]  # "Submitted batch job 12345"
-
-
-def is_done(system):
-    return os.path.exists(os.path.join(DONE_DIR, f"{system}.log"))
 
 
 # --- extend-mode storage pre-check -----------------------------------------
@@ -192,21 +184,21 @@ def storage_state():
 
 def run_fresh(args, systems):
     """Submit a fresh production run_md.sh per system, once, up to --cap in flight."""
-    os.makedirs(MARKER_DIR, exist_ok=True)
     todo = []
-    for system in systems:
-        if os.path.exists(os.path.join(MARKER_DIR, f"submitted_{system}.log")):
+    for system, out_dir in systems.items():
+        marker = os.path.join(out_dir, "launch.submitted")
+        if os.path.exists(marker):
             print(f"skip     {system} (already submitted)")
             continue
-        npt = os.path.join(PRE_DIR, system, "npt.gro")
+        npt = os.path.join(out_dir, "preprocessing", "npt.gro")
         if not os.path.exists(npt):
             print(f"MISSING  {system}: no {npt} — not prepped, skipping",
                   file=sys.stderr)
             continue
-        todo.append(system)
+        todo.append((system, out_dir))
 
     if args.dry_run:
-        for system in todo:
+        for system, _ in todo:
             print(f"submit   {system} (dry-run)")
         print(f"\n{len(todo)} systems would be submitted (cap={args.cap})")
         return
@@ -215,9 +207,9 @@ def run_fresh(args, systems):
     while todo:
         free = args.cap - len(queued_names())
         while free > 0 and todo:
-            system = todo.pop(0)
-            job_id = submit(system)
-            with open(os.path.join(MARKER_DIR, f"submitted_{system}.log"), "w") as fh:
+            system, out_dir = todo.pop(0)
+            job_id = submit(system, out_dir)
+            with open(os.path.join(out_dir, "launch.submitted"), "w") as fh:
                 fh.write(f"system: {system}\nsubmitted: {datetime.now().isoformat()}\n"
                          f"job: {job_id}\n")
             print(f"submit   {system} -> job {job_id}  ({len(todo)} left)")
@@ -232,13 +224,15 @@ def run_fresh(args, systems):
 def run_extend(args, systems):
     """Extend each system to --target-ns, resubmitting until its done marker
     appears (or --max-attempts is hit). Completed production runs go first."""
-    os.makedirs(DONE_DIR, exist_ok=True)
     state = None if args.no_check_storage else storage_state()
     latest, completed = (None, None) if state is None else state
     active = queued_names()
 
     def in_queue(system):
         return f"{JOB_PREFIX}{system}" in active
+
+    def is_done(system):
+        return os.path.exists(os.path.join(systems[system], "extend.done"))
 
     ready, partial = [], []
     for system in systems:
@@ -306,7 +300,7 @@ def run_extend(args, systems):
         free = args.cap - len(active)
         while free > 0 and pending:
             system = pending.pop(0)
-            job_id = submit(system, args.target_ns)
+            job_id = submit(system, systems[system], args.target_ns)
             attempts[system] += 1
             active.add(f"{JOB_PREFIX}{system}")
             tail = f" (attempt {attempts[system]})" if attempts[system] > 1 else ""
@@ -335,10 +329,9 @@ def run_extend(args, systems):
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("systems_path", nargs="?", default=None,
-                    help="optional file with one system name per line "
-                         "(default: every prepped system under "
-                         "results/preprocessing/)")
+    ap.add_argument("manifest", nargs="?", default="manifest.json",
+                    help="manifest.json written by the pipeline's write_manifest "
+                         "rule (default: manifest.json)")
     ap.add_argument("--cap", type=int, default=98, help="max queued jobs (default: 98)")
     ap.add_argument("--interval", type=int, default=300,
                     help="seconds between queue-refill polls (default: 300)")
@@ -365,10 +358,12 @@ def main():
     os.environ.setdefault("NVIDIA_VISIBLE_DEVICES", "all")
     os.environ.setdefault("NVIDIA_DRIVER_CAPABILITIES", "compute,utility")
 
-    systems = (named_systems(args.systems_path) if args.systems_path
-               else prepped_systems())
+    try:
+        systems = load_manifest(args.manifest)
+    except (OSError, ValueError, KeyError) as e:
+        sys.exit(f"cannot read manifest {args.manifest}: {e}")
     if not systems:
-        sys.exit(f"No systems found (nothing with npt.gro under {PRE_DIR}).")
+        sys.exit(f"{args.manifest} lists no systems.")
     (run_extend if args.extend else run_fresh)(args, systems)
 
 
