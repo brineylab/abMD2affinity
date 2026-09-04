@@ -3,11 +3,11 @@
 # run_md_extend.sh — EXTEND one system's production MD up to a target length
 # (default 500 ns) by continuing from whatever trajectory already exists in
 # object storage. Standalone per-job script, submitted once per system by
-# slurm/launch_experiments_extend.py. Does NOT touch the original run_md.sh /
+# slurm/launch_experiments.py --extend. Does NOT touch the original run_md.sh /
 # production_md path — it starts from the finished (or partially finished)
 # trajectory that run_md.sh already uploaded.
 #
-# Args (passed by launch_experiments_extend.py):
+# Args (passed by launch_experiments.py --extend):
 #   $1  system name     e.g. 1bj1fv_WT — the {system} used in dir names
 #   $2  target_ns      (optional) total simulation length in ns; default 500
 #
@@ -30,7 +30,7 @@
 #
 # GPU note: identical to run_md.sh — the CUDA driver is injected by enroot's
 # NVIDIA hook, which needs NVIDIA_VISIBLE_DEVICES + NVIDIA_DRIVER_CAPABILITIES
-# set at container start. launch_experiments_extend.py sets them in the
+# set at container start. launch_experiments.py sets them in the
 # submitting environment so sbatch (--export=ALL) carries them into each job.
 
 # --- job -------------------------------------------------------------------

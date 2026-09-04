@@ -168,7 +168,7 @@ them concurrently. Each process picks up its allocated device via
   that bypasses Snakemake on compute nodes: the launcher submits one
   `run_md.sh` job per prepped system (`results/preprocessing/<system>/npt.gro`),
   capped at `--cap` jobs in the queue, with marker files for resume.
-- `run_md_extend.sh` / `launch_experiments_extend.py` — extend existing
+- `launch_experiments.py --extend` / `run_md_extend.sh` — extend existing
   trajectories in object storage to a target length (default 500 ns) by
   resuming mdrun from the furthest-along checkpoint.
 
