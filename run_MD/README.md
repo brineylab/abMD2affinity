@@ -115,6 +115,10 @@ snakemake --configfile config.yaml -n
 # Full run
 snakemake --configfile config.yaml --cores 32 --resources gpu=<n_gpus>
 
+# Preprocessing only (through npt.gro + per-system md.mdp + manifest) —
+# e.g. to hand production MD to the standalone slurm launcher
+snakemake --configfile config.yaml --cores 32 --resources gpu=<n_gpus> preprocess
+
 # Short smoke test: the structures.yaml systems, 1 ns each
 # (wraps the container + GPU wiring)
 bash scripts/run_test_1ns.sh

@@ -1,0 +1,25 @@
+# Input configuration for prepare_structures.py — selects docked complexes
+# for 5 ns MD from the epiLora HADDOCK3 docking runs.
+# Relative paths resolve against this file's directory.
+
+# epiLora docking pipeline root (holds runs/, runs_vanilla/, results/).
+docking_root: "../../epiLoRA/docking"
+
+# Per-cluster-model CAPRI metrics (written by the docking pipeline's
+# capri_acceptable rule), relative to docking_root.
+capri_details: "results/capri_model_details.csv"
+
+# De-redundancy: within each (pdb, ab_run, condition) group, superpose on the
+# antigen (chain A) CA and compute antibody (chain B) CA RMSD; <= this many
+# angstroms counts as the same binding mode and only the best representative
+# is kept.
+rmsd_threshold: 2.0
+
+# Seed for the uniform random draw of incorrectly-docked structures.
+seed: 42
+
+# Additionally, per pdb that has any winner: keep this many best-HADDOCK-score
+# (most negative first) models — both conditions pooled, any CAPRI quality,
+# i.e. what you would run if you trusted the score. Non-redundant and not
+# already in the test set.
+top_per_pdb: 50

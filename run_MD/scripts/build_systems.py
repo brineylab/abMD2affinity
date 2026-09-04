@@ -148,16 +148,16 @@ def build_systems(loaded: dict,
         raise ValueError("structures file must set a top-level 'base_dir'")
 
     base_dir = Path(doc["base_dir"])
-    if not base_dir.is_absolute():
-        base_dir = anchor / base_dir
+    base_dir = base_dir.resolve() if base_dir.is_absolute() \
+        else (anchor / base_dir).resolve()
 
     top_output = doc.get("output_dir")
     if top_output:
         top_output = Path(top_output)
         results_root = (top_output if top_output.is_absolute()
-                        else base_dir / top_output)
+                        else base_dir / top_output).resolve()
     else:
-        results_root = base_dir / "results"
+        results_root = (base_dir / "results").resolve()
 
     systems: dict = {}
     for idx, spec in enumerate(structures):
@@ -193,10 +193,10 @@ def build_systems(loaded: dict,
         out_dir = spec.get("output_dir")
         if out_dir:
             out_dir = Path(out_dir)
-            if not out_dir.is_absolute():
-                out_dir = base_dir / out_dir
+            out_dir = out_dir.resolve() if out_dir.is_absolute() \
+                else (base_dir / out_dir).resolve()
         else:
-            out_dir = results_root / name
+            out_dir = (results_root / name).resolve()
 
         systems[name] = {
             "name":       name,

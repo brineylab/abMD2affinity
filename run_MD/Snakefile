@@ -57,7 +57,7 @@ GMX_PYTHON     = config.get("gmx_python_bin", "python3")
 PYMOL_PYTHON   = config.get("pymol_python_bin", "python")
 OPENMM_PYTHON  = config.get("openmm_python_bin", "python")
 S5CMD          = config.get("s5cmd_bin", "s5cmd")
-OUTPUT_DEST    = config.get("output_dir", "").rstrip("/")  # object-storage sync destination
+OUTPUT_DEST    = (config.get("output_dir") or "").rstrip("/")  # object-storage sync destination
 MDP_MD_BASE    = config.get("mdp_md", "mdp/md.mdp")
 
 MAKE_MOVIE     = config.get("make_movie", True)
@@ -109,6 +109,17 @@ rule all:
     input:
         _TARGETS,
         str(RESULTS_ROOT / "manifest.json"),
+
+
+# Preprocessing only (everything up to npt.gro, plus the per-system md.mdp
+# and manifest) — use this to hand production MD to the standalone slurm
+# launcher instead of running it through Snakemake:
+#   snakemake --configfile config.yaml --cores 32 --resources gpu=4 preprocess
+rule preprocess:
+    input:
+        [f"{v['output_dir']}/preprocessing/npt.gro" for v in SYSTEMS.values()]
+        + [f"{v['output_dir']}/MD/md.mdp" for v in SYSTEMS.values()]
+        + [str(RESULTS_ROOT / "manifest.json")],
 
 
 # ---------------------------------------------------------------------------

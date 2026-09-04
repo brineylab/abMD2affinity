@@ -227,3 +227,8 @@ results/
 
 # AB-Bind mutant PDBs materialised by build_structures.py
 mutant_binding_affinity/mutants/
+
+# MD output for the docked-complex runs (written by run_MD)
+haddock_out/results/
+haddock_out/data/
+haddock_out/intermediate_data/
