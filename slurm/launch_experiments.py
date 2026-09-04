@@ -1,30 +1,32 @@
 #!/usr/bin/env python
-"""Submit production-MD jobs (slurm/run_md.sh), one per row in a mutants
-TSV, keeping at most --cap jobs in the Slurm queue at a time.
+"""Submit production-MD jobs (slurm/run_md.sh), one per prepped system,
+keeping at most --cap jobs in the Slurm queue at a time.
 
-    python slurm/launch_experiments.py [data/completed_mutants.tsv] \
-        [--cap 80] [--interval 60] [--dry-run]
+    python slurm/launch_experiments.py [systems.txt] \
+        [--cap 98] [--interval 300] [--dry-run]
 
-Run this on the LOGIN/submit node (it only needs `sbatch`/`squeue` + the Python
-stdlib — not the container). For each TSV row it derives the run name
-'<pdb>_<tag>' (tag = the same ':'->'-', ','->'_' sanitisation the Snakefile /
-build_manifest use), then, once a queue slot frees up, submits slurm/run_md.sh
-for it. A marker file results/launch/submitted_<run>.log is written at
+Run this on the LOGIN/submit node (it only needs `sbatch`/`squeue` + the
+Python stdlib — not the container). The work list is every system that has
+finished preprocessing (results/preprocessing/<system>/npt.gro), so it stays
+in sync with whatever the pipeline has actually produced. To submit only a
+subset, pass a file with one system name per line.
+
+For each system, once a queue slot frees up, it submits slurm/run_md.sh for
+it. A marker file results/launch/submitted_<system>.log is written at
 submission and is the "already launched, skip it" flag, so re-running resumes
 where it left off (delete a marker to force a re-submit).
 
 The script polls squeue every --interval seconds, topping the queue back up to
---cap, until every row has been submitted. Only jobs whose name starts with the
-'abmd_' prefix count toward the cap, so unrelated jobs of yours don't crowd it.
+--cap, until every system has been submitted. Only jobs whose name starts with
+the 'abmd_' prefix count toward the cap, so unrelated jobs of yours don't
+crowd it.
 
 --dry-run lists what it would submit (builds no markers, submits nothing).
 """
 
 import argparse
-import csv
 import getpass
 import os
-import re
 import subprocess
 import sys
 import time
@@ -38,15 +40,19 @@ PRE_DIR = os.path.join(REPO, "results", "preprocessing")
 JOB_PREFIX = "abmd_"   # only jobs whose name starts with this count toward --cap
 
 
-def mutation_tag(mut: str) -> str:
-    """Same sanitisation as build_manifest.mutation_tag (dir-name form)."""
-    tag = mut.strip().replace(":", "-").replace(",", "_").replace(" ", "")
-    return re.sub(r"[^A-Za-z0-9._-]", "", tag)
+def prepped_systems() -> list[str]:
+    """Systems with a finished preprocessing dir (npt.gro present)."""
+    out = []
+    if os.path.isdir(PRE_DIR):
+        for name in sorted(os.listdir(PRE_DIR)):
+            if os.path.isfile(os.path.join(PRE_DIR, name, "npt.gro")):
+                out.append(name)
+    return out
 
 
-def read_rows(path):
-    with open(path, newline="") as fh:
-        return list(csv.DictReader(fh, delimiter="\t"))
+def named_systems(path) -> list[str]:
+    with open(path) as fh:
+        return [line.strip() for line in fh if line.strip()]
 
 
 def queued_count() -> int:
@@ -59,9 +65,8 @@ def queued_count() -> int:
     return sum(1 for name in out.split() if name.startswith(JOB_PREFIX))
 
 
-def submit(pdb: str, tag: str) -> str:
-    run = f"{pdb}_{tag}"
-    cmd = ["sbatch", f"--job-name={JOB_PREFIX}{run}", RUN_SCRIPT, pdb, tag]
+def submit(system: str) -> str:
+    cmd = ["sbatch", f"--job-name={JOB_PREFIX}{system}", RUN_SCRIPT, system]
     out = subprocess.run(
         cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         universal_newlines=True,
@@ -72,13 +77,14 @@ def submit(pdb: str, tag: str) -> str:
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("experiments_path", nargs="?",
-                    default="data/completed_mutants.tsv",
-                    help="mutants TSV (default: data/completed_mutants.tsv)")
+    ap.add_argument("systems_path", nargs="?", default=None,
+                    help="optional file with one system name per line "
+                         "(default: every prepped system under "
+                         "results/preprocessing/)")
     ap.add_argument("--cap", type=int, default=98,
-                    help="max jobs in the queue at once (default: 80)")
+                    help="max jobs in the queue at once (default: 98)")
     ap.add_argument("--interval", type=int, default=300,
-                    help="seconds between queue-refill polls (default: 60)")
+                    help="seconds between queue-refill polls (default: 300)")
     ap.add_argument("--dry-run", action="store_true",
                     help="list what would be submitted; submit nothing")
     args = ap.parse_args()
@@ -92,28 +98,29 @@ def main():
     os.environ.setdefault("NVIDIA_VISIBLE_DEVICES", "all")
     os.environ.setdefault("NVIDIA_DRIVER_CAPABILITIES", "compute,utility")
 
-    rows = read_rows(args.experiments_path)
+    systems = (named_systems(args.systems_path) if args.systems_path
+               else prepped_systems())
+    if not systems:
+        sys.exit("No systems found — run the pipeline's preprocessing first "
+                 f"(nothing with npt.gro under {PRE_DIR}).")
     os.makedirs(MARKER_DIR, exist_ok=True)
 
-    # Work list: rows not already submitted and whose prepped inputs exist.
+    # Work list: systems not already submitted and whose prepped inputs exist.
     todo = []
-    for row in rows:
-        pdb = row["pdb_id"].strip()
-        tag = mutation_tag(row["mutant"])
-        run = f"{pdb}_{tag}"
-        if os.path.exists(os.path.join(MARKER_DIR, f"submitted_{run}.log")):
-            print(f"skip     {run} (already submitted)")
+    for system in systems:
+        if os.path.exists(os.path.join(MARKER_DIR, f"submitted_{system}.log")):
+            print(f"skip     {system} (already submitted)")
             continue
-        npt = os.path.join(PRE_DIR, pdb, run, "npt.gro")
+        npt = os.path.join(PRE_DIR, system, "npt.gro")
         if not os.path.exists(npt):
-            print(f"MISSING  {run}: no {npt} — not prepped, skipping",
+            print(f"MISSING  {system}: no {npt} — not prepped, skipping",
                   file=sys.stderr)
             continue
-        todo.append((pdb, tag, run))
+        todo.append(system)
 
     if args.dry_run:
-        for pdb, tag, run in todo:
-            print(f"submit   {run} (dry-run)")
+        for system in todo:
+            print(f"submit   {system} (dry-run)")
         print(f"\n{len(todo)} systems would be submitted (cap={args.cap})")
         return
 
@@ -123,15 +130,13 @@ def main():
     while todo:
         free = args.cap - queued_count()
         while free > 0 and todo:
-            pdb, tag, run = todo.pop(0)
-            job_id = submit(pdb, tag)
-            with open(os.path.join(MARKER_DIR, f"submitted_{run}.log"), "w") as fh:
-                fh.write(f"run: {run}\n")
+            system = todo.pop(0)
+            job_id = submit(system)
+            with open(os.path.join(MARKER_DIR, f"submitted_{system}.log"), "w") as fh:
+                fh.write(f"system: {system}\n")
                 fh.write(f"submitted: {datetime.now().isoformat()}\n")
                 fh.write(f"job: {job_id}\n")
-                fh.write(f"pdb: {pdb}\n")
-                fh.write(f"tag: {tag}\n")
-            print(f"submit   {run} -> job {job_id}  ({len(todo)} left)")
+            print(f"submit   {system} -> job {job_id}  ({len(todo)} left)")
             free -= 1
         if todo:
             print(f"[{datetime.now():%H:%M:%S}] queue at "

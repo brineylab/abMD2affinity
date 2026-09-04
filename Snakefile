@@ -1,9 +1,8 @@
-# Snakefile — MD2affinity: PDB prep + MD preprocessing + production MD
+# Snakefile — MD pipeline: PDB prep + MD preprocessing + production MD
 #
 # Covers:
 #   PDB structure
-#     -> extract chains (Python)
-#     -> apply mutation (PyMOL)                       } PDB prep
+#     -> extract chains (Python)                       } PDB prep
 #     -> vacuum minimize (OpenMM, GPU)
 #     -> PDB2PQR pH 7 protonation
 #     -> pdb2gmx AMBER99SB-ILDN
@@ -13,20 +12,22 @@
 #     -> GROMACS EM (steepest descent)
 #     -> NVT equilibration (100 ps)
 #     -> NPT equilibration (100 ps)
-#     -> production MD (100 ns, GPU)                   } production MD
-#
-# Does NOT include trajectory analysis / Spearman correlation — see the
-# parent MD2affinity repo for that stage.
+#     -> production MD (md_ns / md_steps, GPU)         } production MD
 #
 # Input:
-#   - config["mutants_tsv"]: TSV with columns pdb_id, mutant.
-#   - config["structures"]:  per-PDB map of input PDB file + optional chain_map
-#                            remapping H/L to real chain letters (see
-#                            scripts/build_manifest.py).
+#   - a structures list (config key `structures_file`, default structures.yaml,
+#     or an inline `structures:` list in config.yaml): one entry per structure
+#     to run MD on ({name, path}, with optional per-structure `chains` and an
+#     optional `md_ns`/`md_steps` that overrides the global default).
+#     See scripts/build_systems.py.
+#   - config["md_ns"] or config["md_steps"]: default production-MD length;
+#     the base .mdp's `nsteps` is rewritten per system (rule write_md_mdp).
 #
 # Output layout (under config["output_dir"], default "results/"):
-#   preprocessing/{pdb}/{pdb}_{mut}/   — chain extraction through NPT equilibration
-#   MD/{pdb}/{pdb}_{mut}/              — production MD only
+#   preprocessing/{system}/   — chain extraction through NPT equilibration
+#   MD/{system}/              — production MD only
+#   params/{system}/md.mdp    — production .mdp with that system's length
+#   manifest.json             — parsed system manifest (audit)
 #
 # A sync gate (rule sync_preprocessing) copies the entire preprocessing/ tree
 # to object storage via `s5cmd sync` once every requested system has reached
@@ -44,7 +45,7 @@
 #   snakemake --configfile config.yaml -n
 # Single system:
 #   snakemake --configfile config.yaml --cores 8 --resources gpu=1 \
-#       results/MD/1dqj/1dqj_H-D32A/md.gro
+#       results/MD/1bj1fv/md.gro
 # Slurm:
 #   sbatch slurm/submit_pipeline.sbatch
 
@@ -52,7 +53,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, "scripts")
-from build_manifest import build_systems
+from build_systems import build_systems, load_structures
 
 configfile: "config.yaml"
 
@@ -69,60 +70,54 @@ PYMOL_PYTHON   = config.get("pymol_python_bin", "python")
 OPENMM_PYTHON  = config.get("openmm_python_bin", "python")
 S5CMD          = config.get("s5cmd_bin", "s5cmd")
 S5CMD_DEST     = config.get("s5cmd_dest", "")
-MDP_MD         = config.get("mdp_md", "mdp/md.mdp")
+MDP_MD_BASE    = config.get("mdp_md", "mdp/md.mdp")
 
 MAKE_MOVIE     = config.get("make_movie", True)
 if isinstance(MAKE_MOVIE, str):
     MAKE_MOVIE = MAKE_MOVIE.strip().lower() not in ("false", "0", "no", "off", "")
 
-_auto_wt = config.get("auto_wt", True)
-if isinstance(_auto_wt, str):
-    _auto_wt = _auto_wt.strip().lower() not in ("false", "0", "no", "off", "")
-
-SYSTEMS = build_systems(config["mutants_tsv"], config["structures"], auto_wt=_auto_wt)
+# One MD system per structures-list entry. Each carries exactly one of
+# md_ns / md_steps (per-structure override, else the global default from
+# config.yaml); build_systems raises if any system ends up with neither.
+SYSTEMS = build_systems(
+    load_structures(config),
+    default_md_ns=config.get("md_ns"),
+    default_md_steps=config.get("md_steps"),
+)
 if not SYSTEMS:
-    raise ValueError(
-        "No systems parsed — check config['mutants_tsv'] and config['structures']."
-    )
-# Constrain {mut} to the exact set of valid mutation tags so Snakemake never
-# tries to apply rules to stale or unrelated files in the output tree.
-_MUTS_PATTERN = "(?:" + "|".join(
-    sorted({v["mutation_tag"] for v in SYSTEMS.values()}, key=len, reverse=True)
-) + ")"
+    raise ValueError("No systems parsed — check the structures list.")
+SYSTEM_NAMES = list(SYSTEMS)
 
-# pdb_id is the structures-map key (e.g. 1dqjfv, 1dqjfab); no underscores, so
-# it never collides with the mutation tag in the {pdb}_{mut} path segment.
+# {system} is the manifest key — validated in build_systems to be a single
+# filesystem-safe path segment, so it can never escape the output tree.
 wildcard_constraints:
-    pdb = "[a-z0-9]+",
-    mut = _MUTS_PATTERN,
-
-
-def sys_key(wc) -> str:
-    return f"{wc.pdb}_{wc.mut}"
+    system = r"[A-Za-z0-9][A-Za-z0-9._-]*",
 
 
 def sys_data(wc) -> dict:
-    return SYSTEMS[sys_key(wc)]
+    return SYSTEMS[wc.system]
 
 
-_PDBS = [v["pdb"] for v in SYSTEMS.values()]
-_MUTS = [v["mutation_tag"] for v in SYSTEMS.values()]
+def md_length_args(system: str) -> str:
+    """--ns/--steps argument for a system's production length."""
+    entry = SYSTEMS[system]
+    return (f"--ns {entry['md_ns']}" if entry["md_ns"] is not None
+            else f"--steps {entry['md_steps']}")
 
 
 # ---------------------------------------------------------------------------
 # Target
 # ---------------------------------------------------------------------------
 
-_TARGETS = list(expand(str(MD / "{pdb}" / "{pdb}_{mut}" / "md.gro"),
-                       zip, pdb=_PDBS, mut=_MUTS))
+_TARGETS = [str(MD / s / "md.gro") for s in SYSTEM_NAMES]
 if MAKE_MOVIE:
-    _TARGETS += list(expand(str(MOVIES / "{pdb}_{mut}.mp4"),
-                            zip, pdb=_PDBS, mut=_MUTS))
+    _TARGETS += [str(MOVIES / f"{s}.mp4") for s in SYSTEM_NAMES]
 
 
 rule all:
     input:
         _TARGETS,
+        str(OUT / "manifest.json"),
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +134,28 @@ rule write_manifest:
 
 
 # ---------------------------------------------------------------------------
+# Step 0b — Production .mdp per system, with that system's run length
+# (per-structure md_ns / md_steps, else the global default)
+# ---------------------------------------------------------------------------
+
+rule write_md_mdp:
+    input:
+        base = MDP_MD_BASE,
+    output:
+        mdp = str(OUT / "params" / "{system}" / "md.mdp"),
+    params:
+        length = lambda wc: md_length_args(wc.system),
+    log:
+        str(OUT / "params" / "{system}" / "write_md_mdp.log"),
+    shell:
+        """
+        {GMX_PYTHON} scripts/make_md_mdp.py \
+            {input.base} {output.mdp} {params.length} \
+            > {log} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
 # Step 1 — Extract the relevant chains from the input PDB (PDB prep)
 # ---------------------------------------------------------------------------
 
@@ -146,11 +163,11 @@ rule extract_chains:
     input:
         pdb = lambda wc: sys_data(wc)["pdb_file"],
     output:
-        pdb = str(PRE / "{pdb}" / "{pdb}_{mut}" / "00_extracted.pdb"),
+        pdb = str(PRE / "{system}" / "extracted.pdb"),
     params:
-        chains = lambda wc: " ".join(sys_data(wc)["chains_to_extract"]),
+        chains = lambda wc: " ".join(sys_data(wc)["chains"]),
     log:
-        str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "extract_chains.log"),
+        str(PRE / "{system}" / "logs" / "extract_chains.log"),
     shell:
         """
         {GMX_PYTHON} scripts/extract_chains.py \
@@ -160,45 +177,18 @@ rule extract_chains:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — Apply mutations with PyMOL (WT systems: copy unchanged) (PDB prep)
-# ---------------------------------------------------------------------------
-
-rule mutate:
-    input:
-        pdb = str(PRE / "{pdb}" / "{pdb}_{mut}" / "00_extracted.pdb"),
-    output:
-        pdb = str(PRE / "{pdb}" / "{pdb}_{mut}" / "01_mutated.pdb"),
-    params:
-        mut_str = lambda wc: sys_data(wc).get("mutation_str_pdb") or "",
-        is_wt   = lambda wc: "1" if sys_data(wc).get("is_wt", False) else "0",
-    log:
-        str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "mutate.log"),
-    shell:
-        """
-        if [ "{params.is_wt}" = "1" ] || [ -z "{params.mut_str}" ]; then
-            cp {input.pdb} {output.pdb}
-            echo "WT — no mutation applied" > {log}
-        else
-            {PYMOL_PYTHON} scripts/mutate_structure.py \
-                {input.pdb} {output.pdb} "{params.mut_str}" \
-                > {log} 2>&1
-        fi
-        """
-
-
-# ---------------------------------------------------------------------------
-# Step 3 — OpenMM vacuum energy minimization, GPU (MD preprocessing)
+# Step 2 — OpenMM vacuum energy minimization, GPU (MD preprocessing)
 # ---------------------------------------------------------------------------
 
 rule openmm_minimize:
     input:
-        pdb = str(PRE / "{pdb}" / "{pdb}_{mut}" / "01_mutated.pdb"),
+        pdb = str(PRE / "{system}" / "extracted.pdb"),
     output:
-        pdb = str(PRE / "{pdb}" / "{pdb}_{mut}" / "minimized.pdb"),
+        pdb = str(PRE / "{system}" / "minimized.pdb"),
     resources:
         gpu = 1,
     log:
-        str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "openmm_minimize.log"),
+        str(PRE / "{system}" / "logs" / "openmm_minimize.log"),
     shell:
         """
         {OPENMM_PYTHON} scripts/minimize_openmm.py \
@@ -208,17 +198,17 @@ rule openmm_minimize:
 
 
 # ---------------------------------------------------------------------------
-# Step 4 — PDB2PQR: PROPKA protonation at pH 7 (MD preprocessing)
+# Step 3 — PDB2PQR: PROPKA protonation at pH 7 (MD preprocessing)
 # ---------------------------------------------------------------------------
 
 rule pdb2pqr:
     input:
-        pdb = str(PRE / "{pdb}" / "{pdb}_{mut}" / "minimized.pdb"),
+        pdb = str(PRE / "{system}" / "minimized.pdb"),
     output:
-        pdb = str(PRE / "{pdb}" / "{pdb}_{mut}" / "protonated.pdb"),
-        pqr = str(PRE / "{pdb}" / "{pdb}_{mut}" / "protonated.pqr"),
+        pdb = str(PRE / "{system}" / "protonated.pdb"),
+        pqr = str(PRE / "{system}" / "protonated.pqr"),
     log:
-        str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "pdb2pqr.log"),
+        str(PRE / "{system}" / "logs" / "pdb2pqr.log"),
     shell:
         """
         {PDB2PQR} \
@@ -232,17 +222,17 @@ rule pdb2pqr:
 
 
 # ---------------------------------------------------------------------------
-# Step 5 — GROMACS topology (pdb2gmx, AMBER99SB-ILDN + TIP3P) (MD preprocessing)
+# Step 4 — GROMACS topology (pdb2gmx, AMBER99SB-ILDN + TIP3P) (MD preprocessing)
 # ---------------------------------------------------------------------------
 
 rule pdb2gmx:
     input:
-        pdb = str(PRE / "{pdb}" / "{pdb}_{mut}" / "protonated.pdb"),
+        pdb = str(PRE / "{system}" / "protonated.pdb"),
     output:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "protein.gro"),
-        top = str(PRE / "{pdb}" / "{pdb}_{mut}" / "topol_base.top"),
+        gro = str(PRE / "{system}" / "protein.gro"),
+        top = str(PRE / "{system}" / "topol_base.top"),
     log:
-        str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "pdb2gmx.log"),
+        str(PRE / "{system}" / "logs" / "pdb2gmx.log"),
     shell:
         """
         ROOT=$(pwd)
@@ -259,16 +249,16 @@ rule pdb2gmx:
 
 
 # ---------------------------------------------------------------------------
-# Step 6 — Simulation box (triclinic, principal-axis aligned, 1.2 nm padding)
+# Step 5 — Simulation box (triclinic, principal-axis aligned, 1.2 nm padding)
 # ---------------------------------------------------------------------------
 
 rule editconf:
     input:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "protein.gro"),
+        gro = str(PRE / "{system}" / "protein.gro"),
     output:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "boxed.gro"),
+        gro = str(PRE / "{system}" / "boxed.gro"),
     log:
-        str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "editconf.log"),
+        str(PRE / "{system}" / "logs" / "editconf.log"),
     shell:
         """
         printf 'Protein\n' | gmx editconf \
@@ -280,18 +270,18 @@ rule editconf:
 
 
 # ---------------------------------------------------------------------------
-# Step 7 — Solvation (TIP3P water)
+# Step 6 — Solvation (TIP3P water)
 # ---------------------------------------------------------------------------
 
 rule solvate:
     input:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "boxed.gro"),
-        top = str(PRE / "{pdb}" / "{pdb}_{mut}" / "topol_base.top"),
+        gro = str(PRE / "{system}" / "boxed.gro"),
+        top = str(PRE / "{system}" / "topol_base.top"),
     output:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "solvated.gro"),
-        top = str(PRE / "{pdb}" / "{pdb}_{mut}" / "topol_solv.top"),
+        gro = str(PRE / "{system}" / "solvated.gro"),
+        top = str(PRE / "{system}" / "topol_solv.top"),
     log:
-        str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "solvate.log"),
+        str(PRE / "{system}" / "logs" / "solvate.log"),
     shell:
         """
         cp {input.top} {output.top}
@@ -305,20 +295,20 @@ rule solvate:
 
 
 # ---------------------------------------------------------------------------
-# Step 8 — Neutralization + 0.15 M NaCl
+# Step 7 — Neutralization + 0.15 M NaCl
 # ---------------------------------------------------------------------------
 
 rule genion:
     input:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "solvated.gro"),
-        top = str(PRE / "{pdb}" / "{pdb}_{mut}" / "topol_solv.top"),
+        gro = str(PRE / "{system}" / "solvated.gro"),
+        top = str(PRE / "{system}" / "topol_solv.top"),
         mdp = "mdp/em_strong.mdp",
     output:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "ions.gro"),
-        top = str(PRE / "{pdb}" / "{pdb}_{mut}" / "topol_ions.top"),
-        tpr = str(PRE / "{pdb}" / "{pdb}_{mut}" / "ions.tpr"),
+        gro = str(PRE / "{system}" / "ions.gro"),
+        top = str(PRE / "{system}" / "topol_ions.top"),
+        tpr = str(PRE / "{system}" / "ions.tpr"),
     log:
-        str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "genion.log"),
+        str(PRE / "{system}" / "logs" / "genion.log"),
     shell:
         """
         cp {input.top} {output.top}
@@ -342,20 +332,20 @@ rule genion:
 
 
 # ---------------------------------------------------------------------------
-# Step 9 — GROMACS energy minimization (steepest descent, CPU)
+# Step 8 — GROMACS energy minimization (steepest descent, CPU)
 # ---------------------------------------------------------------------------
 
 rule gromacs_em:
     input:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "ions.gro"),
-        top = str(PRE / "{pdb}" / "{pdb}_{mut}" / "topol_ions.top"),
+        gro = str(PRE / "{system}" / "ions.gro"),
+        top = str(PRE / "{system}" / "topol_ions.top"),
         mdp = "mdp/em_strong.mdp",
     output:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "em.gro"),
-        tpr = str(PRE / "{pdb}" / "{pdb}_{mut}" / "em.tpr"),
+        gro = str(PRE / "{system}" / "em.gro"),
+        tpr = str(PRE / "{system}" / "em.tpr"),
     threads: CPU_THREADS
     log:
-        str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "em.log"),
+        str(PRE / "{system}" / "logs" / "em.log"),
     shell:
         """
         ROOT=$(pwd)
@@ -375,21 +365,21 @@ rule gromacs_em:
 
 
 # ---------------------------------------------------------------------------
-# Step 10 — NVT equilibration (100 ps, position-restrained, CPU)
+# Step 9 — NVT equilibration (100 ps, position-restrained, CPU)
 # ---------------------------------------------------------------------------
 
 rule nvt:
     input:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "em.gro"),
-        top = str(PRE / "{pdb}" / "{pdb}_{mut}" / "topol_ions.top"),
+        gro = str(PRE / "{system}" / "em.gro"),
+        top = str(PRE / "{system}" / "topol_ions.top"),
         mdp = "mdp/nvt.mdp",
     output:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "nvt.gro"),
-        cpt = str(PRE / "{pdb}" / "{pdb}_{mut}" / "nvt.cpt"),
-        tpr = str(PRE / "{pdb}" / "{pdb}_{mut}" / "nvt.tpr"),
+        gro = str(PRE / "{system}" / "nvt.gro"),
+        cpt = str(PRE / "{system}" / "nvt.cpt"),
+        tpr = str(PRE / "{system}" / "nvt.tpr"),
     threads: CPU_THREADS
     log:
-        str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "nvt.log"),
+        str(PRE / "{system}" / "logs" / "nvt.log"),
     shell:
         """
         ROOT=$(pwd)
@@ -410,7 +400,7 @@ rule nvt:
 
 
 # ---------------------------------------------------------------------------
-# Step 11 — NPT equilibration (100 ps, position-restrained, CPU)
+# Step 10 — NPT equilibration (100 ps, position-restrained, CPU)
 #
 #  This is the last step of "preprocessing" — npt.gro/.cpt is the fully
 #  equilibrated system, ready for production MD.
@@ -418,17 +408,17 @@ rule nvt:
 
 rule npt:
     input:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "nvt.gro"),
-        cpt = str(PRE / "{pdb}" / "{pdb}_{mut}" / "nvt.cpt"),
-        top = str(PRE / "{pdb}" / "{pdb}_{mut}" / "topol_ions.top"),
+        gro = str(PRE / "{system}" / "nvt.gro"),
+        cpt = str(PRE / "{system}" / "nvt.cpt"),
+        top = str(PRE / "{system}" / "topol_ions.top"),
         mdp = "mdp/npt.mdp",
     output:
-        gro = str(PRE / "{pdb}" / "{pdb}_{mut}" / "npt.gro"),
-        cpt = str(PRE / "{pdb}" / "{pdb}_{mut}" / "npt.cpt"),
-        tpr = str(PRE / "{pdb}" / "{pdb}_{mut}" / "npt.tpr"),
+        gro = str(PRE / "{system}" / "npt.gro"),
+        cpt = str(PRE / "{system}" / "npt.cpt"),
+        tpr = str(PRE / "{system}" / "npt.tpr"),
     threads: CPU_THREADS
     log:
-        str(PRE / "{pdb}" / "{pdb}_{mut}" / "logs" / "npt.log"),
+        str(PRE / "{system}" / "logs" / "npt.log"),
     shell:
         """
         ROOT=$(pwd)
@@ -457,7 +447,7 @@ rule npt:
 
 rule sync_preprocessing:
     input:
-        expand(str(PRE / "{pdb}" / "{pdb}_{mut}" / "npt.gro"), zip, pdb=_PDBS, mut=_MUTS),
+        [str(PRE / s / "npt.gro") for s in SYSTEM_NAMES],
     output:
         touch(str(OUT / "preprocessing.synced")),
     params:
@@ -476,25 +466,25 @@ rule sync_preprocessing:
 
 
 # ---------------------------------------------------------------------------
-# Step 12 — Production MD (100 ns, GPU-accelerated)
+# Step 11 — Production MD (length from md_ns / md_steps, GPU-accelerated)
 # ---------------------------------------------------------------------------
 
 rule production_md:
     input:
-        gro    = str(PRE / "{pdb}" / "{pdb}_{mut}" / "npt.gro"),
-        cpt    = str(PRE / "{pdb}" / "{pdb}_{mut}" / "npt.cpt"),
-        top    = str(PRE / "{pdb}" / "{pdb}_{mut}" / "topol_ions.top"),
-        mdp    = MDP_MD,
+        gro    = str(PRE / "{system}" / "npt.gro"),
+        cpt    = str(PRE / "{system}" / "npt.cpt"),
+        top    = str(PRE / "{system}" / "topol_ions.top"),
+        mdp    = str(OUT / "params" / "{system}" / "md.mdp"),
         synced = str(OUT / "preprocessing.synced"),
     output:
-        gro = str(MD / "{pdb}" / "{pdb}_{mut}" / "md.gro"),
-        xtc = str(MD / "{pdb}" / "{pdb}_{mut}" / "md.xtc"),
-        tpr = str(MD / "{pdb}" / "{pdb}_{mut}" / "md.tpr"),
+        gro = str(MD / "{system}" / "md.gro"),
+        xtc = str(MD / "{system}" / "md.xtc"),
+        tpr = str(MD / "{system}" / "md.tpr"),
     threads: CPU_THREADS
     resources:
         gpu = 1,
     log:
-        str(MD / "{pdb}" / "{pdb}_{mut}" / "logs" / "md.log"),
+        str(MD / "{system}" / "logs" / "md.log"),
     shell:
         """
         ROOT=$(pwd)
@@ -529,22 +519,22 @@ rule production_md:
 
 
 # ---------------------------------------------------------------------------
-# Step 13 — Trajectory movie (solute only: strips water + ions, keeps protein
+# Step 12 — Trajectory movie (solute only: strips water + ions, keeps protein
 # and any glycans/ligands). trjconv makes molecules whole & centers, PyMOL
 # ray-traces each frame, ffmpeg encodes to mp4.
 # ---------------------------------------------------------------------------
 
 rule movie:
     input:
-        xtc = str(MD / "{pdb}" / "{pdb}_{mut}" / "md.xtc"),
-        tpr = str(MD / "{pdb}" / "{pdb}_{mut}" / "md.tpr"),
+        xtc = str(MD / "{system}" / "md.xtc"),
+        tpr = str(MD / "{system}" / "md.tpr"),
     output:
-        mp4 = str(MOVIES / "{pdb}_{mut}.mp4"),
+        mp4 = str(MOVIES / "{system}.mp4"),
     params:
         skip = int(config.get("movie_skip", 1)),
         fps  = int(config.get("movie_fps", 15)),
     log:
-        str(MD / "{pdb}" / "{pdb}_{mut}" / "logs" / "movie.log"),
+        str(MD / "{system}" / "logs" / "movie.log"),
     shell:
         """
         MP4="{output.mp4}"
@@ -580,4 +570,3 @@ rule movie:
 
         rm -rf "$FRAMES" "$SOLPDB" "$NDX"
         """
-

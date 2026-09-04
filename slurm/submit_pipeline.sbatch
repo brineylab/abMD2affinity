@@ -10,7 +10,7 @@
 # (openmm_minimize, production_md) each request 1 GPU via `--gres=gpu:1`.
 #
 # This is the setup for fanning production MD across a cluster (e.g. running
-# production-only from a separate dir against completed_mutants.tsv).
+# production-only against a subset of systems via --config structures_file=...).
 #
 # SITE-SPECIFIC — adjust before use:
 #   * SBATCH --partition below (controller queue) and slurm_partition= (job queue)
@@ -22,8 +22,8 @@
 #     loads) — the Slurm executor runs each rule's shell on a bare compute node.
 #
 # Usage: sbatch slurm/submit_pipeline.sbatch [extra snakemake targets/args...]
-#   e.g. production-only against the finished systems:
-#     sbatch slurm/submit_pipeline.sbatch --config mutants_tsv=data/completed_mutants.tsv
+#   e.g. production-only against a specific structures list:
+#     sbatch slurm/submit_pipeline.sbatch --config structures_file=structures_abbind.yaml
 
 #SBATCH --job-name=md2affinity-ctl
 #SBATCH --partition=cpu

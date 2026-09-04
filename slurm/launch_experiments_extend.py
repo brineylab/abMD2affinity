@@ -2,31 +2,33 @@
 """Extend every completed system's production MD up to a target length (default
 500 ns) by continuing from the trajectory already in object storage.
 
-    python slurm/launch_experiments_extend.py [data/completed_mutants.tsv] \
+    python slurm/launch_experiments_extend.py [systems.txt] \
         [--target-ns 500] [--cap 80] [--interval 60] [--once] [--dry-run]
 
-This is the "superpowered" sibling of launch_experiments.py: instead of starting
-a fresh 100 ns production run from npt.gro, it finds each system's existing
+This is the "superpowered" sibling of launch_experiments.py: instead of
+starting a fresh production run from npt.gro, it finds each system's existing
 trajectory in object storage (uploaded there by run_md.sh's sync_job_dir) and
 submits slurm/run_md_extend.sh, which downloads it, raises the step count, and
-resumes mdrun with -cpi -append so the result is one continuous <target> ns run.
-The original launch_experiments.py / run_md.sh are left untouched.
+resumes mdrun with -cpi -append so the result is one continuous <target> ns
+run. The original launch_experiments.py / run_md.sh are left untouched.
 
-Run on the LOGIN/submit node (needs sbatch/squeue, the Python stdlib, and — for
-the storage pre-check — s5cmd with the object-storage keys from ~/.env sourced
-into your shell). For each TSV row it derives run '<pdb>_<tag>' (same
-':'->'-', ','->'_' sanitisation as build_manifest) and:
+Run on the LOGIN/submit node (needs sbatch/squeue, the Python stdlib, and —
+for the storage pre-check — s5cmd with the object-storage keys from ~/.env
+sourced into your shell). The work list defaults to every system that has
+finished preprocessing (results/preprocessing/<system>/npt.gro); pass a file
+with one system name per line to submit a subset. For each system it:
 
-  * skips it if results/launch_extend/done/<run>.log exists (already at target);
-  * skips it if a job named abmd_<run> is already in the queue (in flight);
+  * skips it if results/launch_extend/done/<system>.log exists (already at target);
+  * skips it if a job named abmd_<system> is already in the queue (in flight);
   * skips it (with a warning) if no md.cpt for it exists in object storage
     (nothing to continue — it was never produced); use --no-check-storage to
     submit anyway and let the job discover it;
   * otherwise submits run_md_extend.sh once a queue slot (<= --cap) frees up,
-    PREFERRING systems whose 100 ns run has completed. Completion is judged by
-    md.gro (the final confout, written only when mdrun reaches nsteps) existing
-    in some prefix; completed systems are submitted before partial ones. Pass
-    --completed-only to skip partial (no-md.gro) runs entirely.
+    PREFERRING systems whose production run has completed. Completion is
+    judged by md.gro (the final confout, written only when mdrun reaches
+    nsteps) existing in some prefix; completed systems are submitted before
+    partial ones. Pass --completed-only to skip partial (no-md.gro) runs
+    entirely.
 
 Note: the resume source is still the furthest-along md.cpt (highest jobid),
 completed or not — that's what lets a partially-extended run pick up where it
@@ -42,7 +44,6 @@ babysitting); --dry-run reports what it would do and submits nothing.
 """
 
 import argparse
-import csv
 import getpass
 import os
 import re
@@ -56,6 +57,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 RUN_SCRIPT = os.path.join(HERE, "run_md_extend.sh")
 DONE_DIR = os.path.join(REPO, "results", "launch_extend", "done")
+PRE_DIR = os.path.join(REPO, "results", "preprocessing")
 JOB_PREFIX = "abmd_"   # extend jobs share this name shape with run_md.sh so
                        # run_md_extend's storage discovery (abmd_<sys>_*) finds
                        # both the original run and its own partials.
@@ -72,23 +74,27 @@ OBJ_ENDPOINT = os.environ.get("OBJ_ENDPOINT", "https://cwobject.com")
 OBJ_BUCKET = os.environ.get("OBJ_BUCKET", "brineylab-us-east")
 
 
-def mutation_tag(mut: str) -> str:
-    """Same sanitisation as build_manifest.mutation_tag (dir-name form)."""
-    tag = mut.strip().replace(":", "-").replace(",", "_").replace(" ", "")
-    return re.sub(r"[^A-Za-z0-9._-]", "", tag)
+def prepped_systems() -> list[str]:
+    """Systems with a finished preprocessing dir (npt.gro present)."""
+    out = []
+    if os.path.isdir(PRE_DIR):
+        for name in sorted(os.listdir(PRE_DIR)):
+            if os.path.isfile(os.path.join(PRE_DIR, name, "npt.gro")):
+                out.append(name)
+    return out
 
 
-def read_rows(path):
-    with open(path, newline="") as fh:
-        return list(csv.DictReader(fh, delimiter="\t"))
+def named_systems(path) -> list[str]:
+    with open(path) as fh:
+        return [line.strip() for line in fh if line.strip()]
 
 
 def queued_names():
     """Names of my PENDING/RUNNING/CONFIGURING jobs that start with JOB_PREFIX.
 
     Returns None (with a warning) if squeue isn't available — e.g. a --dry-run
-    on a non-cluster box — so the queue pre-check degrades gracefully instead of
-    crashing. Callers treat None as "queue unknown".
+    on a non-cluster box — so the queue pre-check degrades gracefully instead
+    of crashing. Callers treat None as "queue unknown".
     """
     try:
         out = subprocess.run(
@@ -131,13 +137,14 @@ def _s5_ls(pattern):
 def storage_state():
     """Inspect object storage. Returns (latest, completed) or None if unreachable.
 
-      latest    : {'<pdb>_<tag>': highest jobid whose prefix has an md.cpt} —
+      latest    : {'<system>': highest jobid whose prefix has an md.cpt} —
                   the furthest-along run to resume from.
-      completed : set of systems whose 100 ns run finished normally, i.e. some
-                  prefix has an md.gro (the final confout, written only when
-                  mdrun reaches nsteps; a killed/requeued run has md.cpt but no
-                  md.gro). None if the md.gro listing itself was inconclusive, in
-                  which case callers treat completion as unknown (assume ready).
+      completed : set of systems whose production run finished normally, i.e.
+                  some prefix has an md.gro (the final confout, written only
+                  when mdrun reaches nsteps; a killed/requeued run has md.cpt
+                  but no md.gro). None if the md.gro listing itself was
+                  inconclusive, in which case callers treat completion as
+                  unknown (assume ready).
     """
     base = f"s3://{OBJ_BUCKET}/{getpass.getuser()}"
 
@@ -166,10 +173,9 @@ def storage_state():
     return dict(latest), completed
 
 
-def submit(run: str, target_ns: int) -> str:
-    pdb, tag = run.split("_", 1)
-    cmd = ["sbatch", f"--job-name={JOB_PREFIX}{run}",
-           RUN_SCRIPT, pdb, tag, str(target_ns)]
+def submit(system: str, target_ns: int) -> str:
+    cmd = ["sbatch", f"--job-name={JOB_PREFIX}{system}",
+           RUN_SCRIPT, system, str(target_ns)]
     out = subprocess.run(
         cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         universal_newlines=True,
@@ -177,16 +183,17 @@ def submit(run: str, target_ns: int) -> str:
     return out.split()[-1]  # "Submitted batch job 12345"
 
 
-def is_done(run: str) -> bool:
-    return os.path.exists(os.path.join(DONE_DIR, f"{run}.log"))
+def is_done(system: str) -> bool:
+    return os.path.exists(os.path.join(DONE_DIR, f"{system}.log"))
 
 
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("experiments_path", nargs="?",
-                    default="data/completed_mutants.tsv",
-                    help="mutants TSV (default: data/completed_mutants.tsv)")
+    ap.add_argument("systems_path", nargs="?", default=None,
+                    help="optional file with one system name per line "
+                         "(default: every prepped system under "
+                         "results/preprocessing/)")
     ap.add_argument("--target-ns", type=int, default=500,
                     help="total trajectory length to reach, ns (default: 500)")
     ap.add_argument("--cap", type=int, default=80,
@@ -198,9 +205,9 @@ def main():
     ap.add_argument("--once", action="store_true",
                     help="submit a single wave (no babysitting) and exit")
     ap.add_argument("--completed-only", action="store_true",
-                    help="only extend systems whose 100 ns run finished (md.gro "
-                         "present); skip partial runs entirely instead of "
-                         "deprioritising them")
+                    help="only extend systems whose production run finished "
+                         "(md.gro present); skip partial runs entirely instead "
+                         "of deprioritising them")
     ap.add_argument("--no-check-storage", action="store_true",
                     help="don't pre-list object storage; submit and let the job "
                          "discover the trajectory (or fail if none)")
@@ -214,33 +221,36 @@ def main():
     os.environ.setdefault("NVIDIA_VISIBLE_DEVICES", "all")
     os.environ.setdefault("NVIDIA_DRIVER_CAPABILITIES", "compute,utility")
 
-    rows = read_rows(args.experiments_path)
+    systems = (named_systems(args.systems_path) if args.systems_path
+              else prepped_systems())
+    if not systems:
+        sys.exit(f"No systems found (nothing with npt.gro under {PRE_DIR}).")
     os.makedirs(DONE_DIR, exist_ok=True)
 
-    # runs we could extend, in TSV order (deduped)
+    # runs we could extend, in list order (deduped)
     runs, seen = [], set()
-    for row in rows:
-        run = f"{row['pdb_id'].strip()}_{mutation_tag(row['mutant'])}"
-        if run not in seen:
-            seen.add(run)
-            runs.append(run)
+    for system in systems:
+        if system not in seen:
+            seen.add(system)
+            runs.append(system)
 
     # object-storage pre-check: which systems have a trajectory, and which have
-    # a *completed* 100 ns run (md.gro present).
+    # a *completed* production run (md.gro present).
     state = None if args.no_check_storage else storage_state()
     latest, completed = (None, None) if state is None else state
 
-    # queue pre-check: a system whose abmd_<run> job is already PENDING/RUNNING is
-    # in flight and must not be resubmitted. The babysitting loop below already
-    # enforces this per poll; snapshotting it here just lets the report and
-    # --dry-run show what will actually be skipped. Kept in `eligible` regardless
-    # so the loop can still resume it if it dies before reaching the target.
+    # queue pre-check: a system whose abmd_<system> job is already
+    # PENDING/RUNNING is in flight and must not be resubmitted. The babysitting
+    # loop below already enforces this per poll; snapshotting it here just lets
+    # the report and --dry-run show what will actually be skipped. Kept in
+    # `eligible` regardless so the loop can still resume it if it dies before
+    # reaching the target.
     active = queued_names()          # set of abmd_* job names, or None if unknown
 
     def in_queue(run):
         return active is not None and f"{JOB_PREFIX}{run}" in active
 
-    ready, partial = [], []      # completed 100 ns first, then partials
+    ready, partial = [], []      # completed production runs first, then partials
     for run in runs:
         if is_done(run):
             print(f"done     {run} (already at {args.target_ns} ns)")
@@ -257,17 +267,17 @@ def main():
             print(f"extend   {run}{src}{queued}")
             ready.append(run)
         elif args.completed_only:
-            print(f"PARTIAL  {run}{src}: 100 ns not finished (no md.gro), "
+            print(f"PARTIAL  {run}{src}: production run not finished (no md.gro), "
                   f"skipping (--completed-only)", file=sys.stderr)
         else:
-            print(f"extend   {run}{src} [partial 100 ns — no md.gro]{queued}")
+            print(f"extend   {run}{src} [partial run — no md.gro]{queued}")
             partial.append(run)
 
     eligible = ready + partial   # prefer completed runs: submit them first
 
     n_queued = sum(1 for r in eligible if in_queue(r))
     if args.dry_run:
-        extra = f", {len(partial)} of them from partial 100 ns runs" if partial else ""
+        extra = f", {len(partial)} of them from partial runs" if partial else ""
         queued_note = (f"; {n_queued} already in the queue (skipped), "
                        f"{len(eligible) - n_queued} new submission(s)"
                        if n_queued else "")

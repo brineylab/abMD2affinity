@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-build_mutants_tsv.py — Derive the pipeline's (pdb_id, mutant) TSV from the raw
-AB-Bind-style dataset (data/PRO-25-393-s002.tsv), one block of rows per entry
-in the config `structures` map.
+build_mutants_tsv.py — Derive the (pdb_id, mutant) TSV from the raw AB-Bind
+dataset (data/PRO-25-393-s002.tsv), one block of rows per entry in the
+`structures` map of abbind_scripts/abbind.yaml.
 
 Each structures key is a pdb_id (e.g. 1dqjfv, 1dqjfab); its first 4 characters
-are the dataset code looked up in the raw TSV's "#PDB" column. So a fab/fv pair
-(1dqjfv + 1dqjfab) both draw the 1dqj mutants, giving two independent systems.
+are the dataset code looked up in the raw TSV's "#PDB" column. So a fab/fv
+pair (1dqjfv + 1dqjfab) both draw the 1dqj mutants, giving two independent
+systems.
 
 Mutation strings are copied through unchanged (AB-Bind notation: H/L for the
-antibody, real letters for antigen); any H/L -> real chain remapping happens at
-runtime via each structure's chain_map in config.yaml.
+antibody, real letters for antigen); the H/L -> real chain remapping happens
+in build_structures.py via each structure's chain_map.
 
 Usage:
-    python build_mutants_tsv.py data/PRO-25-393-s002.tsv config.yaml -o data/mutants.tsv
+    python abbind_scripts/build_mutants_tsv.py abbind_scripts/abbind.yaml
 """
 
 import argparse
@@ -43,14 +44,16 @@ def mutants_by_code(raw_tsv: Path) -> dict[str, list[str]]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("raw_tsv", help="raw AB-Bind dataset, e.g. data/PRO-25-393-s002.tsv")
-    ap.add_argument("config", help="config.yaml providing the 'structures' map")
-    ap.add_argument("-o", "--out", default="data/mutants.tsv")
+    ap.add_argument("config", help="abbind_scripts/abbind.yaml")
+    ap.add_argument("-o", "--out", default=None,
+                    help="output TSV (default: the config's mutants_tsv)")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
     structures = cfg["structures"]
-    by_code = mutants_by_code(Path(args.raw_tsv))
+    out_path = args.out or cfg["mutants_tsv"]
+
+    by_code = mutants_by_code(Path(cfg["raw_tsv"]))
 
     rows: list[tuple[str, str]] = []
     for pdb_id in structures:
@@ -66,7 +69,7 @@ def main() -> None:
     if not rows:
         sys.exit("No rows produced — check the structures map and dataset codes.")
 
-    with open(args.out, "w", newline="") as f:
+    with open(out_path, "w", newline="") as f:
         w = csv.writer(f, delimiter="\t", lineterminator="\n")
         w.writerow(["pdb_id", "mutant"])
         w.writerows(rows)
@@ -74,7 +77,7 @@ def main() -> None:
     by_pdb: dict[str, int] = defaultdict(int)
     for pdb_id, _ in rows:
         by_pdb[pdb_id] += 1
-    print(f"Wrote {len(rows)} rows for {len(by_pdb)} pdb_ids -> {args.out}")
+    print(f"Wrote {len(rows)} rows for {len(by_pdb)} pdb_ids -> {out_path}")
     for pdb_id in sorted(by_pdb):
         print(f"  {pdb_id}: {by_pdb[pdb_id]} mutants")
 

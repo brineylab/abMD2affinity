@@ -1,6 +1,7 @@
 #!/bin/bash
-# run_test_1ns.sh — smoke-test the pipeline: one mutant per structure PDB,
-# 1 ns production MD, inside the abmd2affinity container.
+# run_test_1ns.sh — smoke-test the pipeline: the structures listed in
+# structures.yaml (one system by default), 1 ns production MD, inside the
+# pipeline container.
 #
 # GPU is wired into rootless podman by hand (no nvidia-container-toolkit here):
 # bind the host driver .so's + nvidia device nodes, then ldconfig in-container.
@@ -25,7 +26,7 @@ exec podman run --rm \
     "$IMAGE" bash -lc "
         ldconfig 2>/dev/null || true
         snakemake --configfile config.yaml \
-            --config mutants_tsv=data/mutants_test.tsv mdp_md=mdp/md_1ns.mdp auto_wt=false \
+            --config md_ns=1 \
             --cores $CORES --resources gpu=1 \
             --keep-going --rerun-incomplete --printshellcmds \
             all

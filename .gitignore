@@ -224,3 +224,6 @@ __marimo__/
 
 # Generated pipeline outputs (MD trajectories, checkpoints, movies, etc.)
 results/
+
+# AB-Bind mutant PDBs materialised by abbind_scripts/build_structures.py
+data/abbind_mutants/

@@ -1,0 +1,17 @@
+# Structures to run MD on — the pipeline's input list.
+#
+# Each entry takes:
+#
+#   name       system name — used as the directory name under results/
+#   path       input PDB (required)
+#   chains     chains to keep (optional; default: every chain in the file)
+#   md_ns /    per-structure production-MD length — overrides the global
+#   md_steps   md_ns / md_steps in config.yaml. At most one of the two.
+structures:
+  - name: 1bj1fv
+    path: data/structures/1bj1fv.pdb
+
+  # Same structure, but run it for 500 ns instead of the global default:
+  # - name: 1dqj_500ns
+  #   path: data/structures/1dqjfv.pdb
+  #   md_ns: 500

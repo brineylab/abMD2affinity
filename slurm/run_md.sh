@@ -1,17 +1,18 @@
 #!/bin/bash
 #
-# run_md.sh — production MD (100 ns) for ONE system, run inside the
-# abMD2affinity container. Submitted once per system by
-# slurm/launch_experiments.py. Mirrors the Snakefile `production_md` rule, but
-# as a standalone per-job script (no Snakemake on the compute node).
+# run_md.sh — production MD for ONE system, run inside the pipeline
+# container. Submitted once per system by slurm/launch_experiments.py.
+# Mirrors the Snakefile `production_md` rule, but as a standalone per-job
+# script (no Snakemake on the compute node).
 #
 # Args (passed by launch_experiments.py):
-#   $1  pdb_id         e.g. 1bj1fv
-#   $2  mutation tag   e.g. V-F17A   (the sanitised {mut} used in dir names)
+#   $1  system name     e.g. 1bj1fv_WT — the {system} used in dir names
 #
 # Inputs it reads from shared storage (exactly what the Snakefile declares):
-#   results/preprocessing/<pdb>/<pdb>_<tag>/{npt.gro,npt.cpt,topol_ions.top}
-#   mdp/md.mdp
+#   results/preprocessing/<system>/{npt.gro,npt.cpt,topol_ions.top}
+#   results/params/<system>/md.mdp — production .mdp with that system's
+#                                  length (rule write_md_mdp; run the pipeline
+#                                  once to generate it)
 # grompp runs *in* that prepped dir so topol_ions.top's #includes resolve; the
 # md.tpr it emits is fully self-contained, so mdrun then runs entirely on
 # local /tmp scratch. sync_job_dir (from ~/.env) uploads the finished run to
@@ -43,15 +44,19 @@
 
 set -euo pipefail
 
-PDB="${1:?usage: run_md.sh <pdb_id> <mutation_tag>}"
-TAG="${2:?usage: run_md.sh <pdb_id> <mutation_tag>}"
-SYS="${PDB}_${TAG}"
+SYS="${1:?usage: run_md.sh <system>}"
 
 # repo on shared storage == the dir sbatch was invoked from
 PROJECT_DIR="${SLURM_SUBMIT_DIR}"
-PREDIR="${PROJECT_DIR}/results/preprocessing/${PDB}/${SYS}"
-MDP="${PROJECT_DIR}/mdp/md.mdp"
+PREDIR="${PROJECT_DIR}/results/preprocessing/${SYS}"
+MDP="${PROJECT_DIR}/results/params/${SYS}/md.mdp"
 THREADS="${SLURM_CPUS_PER_TASK:-8}"
+
+if [ ! -f "${MDP}" ]; then
+    echo "ERROR: ${MDP} not found — generate it first with:" >&2
+    echo "  snakemake --configfile config.yaml ${MDP}" >&2
+    exit 1
+fi
 
 # env file: creates JOB_WORK_DIR on local /tmp, sets object-storage keys, and
 # defines sync_job_dir(). (Same file the example train.sh sources.)
@@ -68,7 +73,7 @@ echo "[$(date)] ${SYS}: grompp (in prepped dir, self-contained md.tpr -> scratch
 
 cd "${JOB_WORK_DIR}"
 
-echo "[$(date)] ${SYS}: production mdrun (GPU-resident, 100 ns)"
+echo "[$(date)] ${SYS}: production mdrun (GPU-resident)"
 CPI=""; [ -f md.cpt ] && CPI="-cpi md.cpt"      # resume if this job requeued
 gmx mdrun -v -deffnm md -s md.tpr ${CPI} \
     -ntmpi 1 -ntomp "${THREADS}" \

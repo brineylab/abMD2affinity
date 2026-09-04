@@ -1,62 +1,28 @@
-# MD2affinity pipeline configuration.
+# MD pipeline configuration.
 # Paths/executables below assume the pipeline runs inside the container built
 # from ./Dockerfile (envs: md / openmm / pymol).
 
-# --- Inputs ---
-# TSV with columns: pdb_id, mutant
-#   - mutant uses AB-Bind notation, e.g. "H:D32A", "H:D32A,L:S30A", "C:K97A"
-#   - antibody heavy/light are written "H"/"L" and remapped to the real chain
-#     letters via each PDB's chain_map below; other letters (antigen) are real
-#     PDB chain letters and pass through unchanged
-#   - an empty mutant field or the literal "WT" requests a wild-type-only run
-# Regenerate from the raw AB-Bind dataset (one block per `structures` entry):
-#   python scripts/build_mutants_tsv.py data/PRO-25-393-s002.tsv config.yaml -o data/mutants.tsv
-mutants_tsv: "data/mutants.tsv"
-
-# Per-PDB structure map. Each key is a pdb_id (== structure filename stem); its
-# first 4 chars are the dataset code used to pull mutants from the raw AB-Bind
-# TSV. `file` is the input PDB; `chain_map` (optional) remaps AB-Bind H/L labels
-# to that structure's real chain letters. Chains to extract are read from the
-# PDB, so only the remap needs listing. Add a fab/fv pair by giving each its own
-# key + file (see 1dqjfv / 1dqjfab).
-structures:
-  1bj1fv:
-    file: "data/structures/1bj1fv.pdb"     # chains H,L,V,W — no remap needed
-  1cz8fv:
-    file: "data/structures/1cz8fv.pdb"     # chains H,L,V,W — no remap needed
-  1jrhfv:
-    file: "data/structures/1jrhfv.pdb"     # chains H,I,L — no remap needed
-  1dqjfv:
-    file: "data/structures/1dqjfv.pdb"     # Fv:  chains A,B,C — antibody is B(H)/A(L)
-    chain_map: {H: B, L: A}
-  1dqjfab:
-    file: "data/structures/1dqjfab.pdb"    # Fab: chains A,B,C — antibody is B(H)/A(L)
-    chain_map: {H: B, L: A}
-  1vfbfv:
-    file: "data/structures/1vfbfv.pdb"     # Fv:  chains A,B,C — antibody is B(H)/A(L), C=lysozyme
-    chain_map: {H: B, L: A}
-  2nyyfv:
-    file: "data/structures/2nyyfv.pdb"     # Fv:  chains A,C,D — antibody is D(H)/C(L), A=antigen
-    chain_map: {H: D, L: C}
-  2nyyfab:
-    file: "data/structures/2nyyfab.pdb"    # Fab: chains A,C,D — antibody is D(H)/C(L), A=antigen
-    chain_map: {H: D, L: C}
-  2nz9fv:
-    file: "data/structures/2nz9fv.pdb"     # Fv:  chains A,C,D — antibody is D(H)/C(L), A=antigen
-    chain_map: {H: D, L: C}
-  2nz9fab:
-    file: "data/structures/2nz9fab.pdb"    # Fab: chains A,C,D — antibody is D(H)/C(L), A=antigen
-    chain_map: {H: D, L: C}
+# --- Input ---
+# The list of structures to run MD on (see structures.yaml for the format:
+# name + path per structure, optional `chains` and an optional per-structure
+# `md_ns`/`md_steps` override). Point this at your own list, or put a
+# `structures:` list directly in this file instead.
+structures_file: "structures.yaml"
 
 # --- Output ---
-# results/preprocessing/{pdb}/{pdb}_{mutant}/   — chain extraction through NPT equilibration
-# results/MD/{pdb}/{pdb}_{mutant}/              — production MD only
+# results/preprocessing/{system}/    — chain extraction through NPT equilibration
+# results/MD/{system}/               — production MD only
+# results/params/{system}/md.mdp     — production .mdp with that system's length
 output_dir: "results"
 
 # --- Simulation ---
-# Production MD .mdp. Override for a short test, e.g.:
-#   snakemake --config mdp_md=mdp/md_1ns.mdp ...
+# Base production-MD .mdp: every parameter except `nsteps` is copied verbatim.
 mdp_md: "mdp/md.mdp"
+
+# Default production-MD length for structures that don't carry their own
+# md_ns / md_steps — set exactly ONE of:
+md_ns: 100              # nanoseconds (converted to steps via the base .mdp's dt)
+# md_steps: 50000000    # ... or a raw integration-step count
 
 # --- Movie ---
 # Render an mp4 of each production trajectory (rule `movie`): water + ions
@@ -76,6 +42,6 @@ s5cmd_dest: ""   # e.g. "s3://my-bucket/md2affinity/preprocessing/"
 # --- Executables (container env paths) ---
 pdb2pqr_bin:       "pdb2pqr"                          # md env (on PATH)
 gmx_python_bin:    "python3"                          # md env — extract_chains.py
-pymol_python_bin:  "/opt/conda/envs/pymol/bin/python" # mutate_structure.py
+pymol_python_bin:  "/opt/conda/envs/pymol/bin/python" # render_movie.py
 openmm_python_bin: "/opt/conda/envs/openmm/bin/python" # minimize_openmm.py
 s5cmd_bin:         "s5cmd"

@@ -8,9 +8,8 @@
 # trajectory that run_md.sh already uploaded.
 #
 # Args (passed by launch_experiments_extend.py):
-#   $1  pdb_id         e.g. 1bj1fv
-#   $2  mutation tag   e.g. V-F17A   (the sanitised {mut} used in dir names)
-#   $3  target_ns      (optional) total simulation length in ns; default 500
+#   $1  system name     e.g. 1bj1fv_WT — the {system} used in dir names
+#   $2  target_ns      (optional) total simulation length in ns; default 500
 #
 # What it does, entirely on local /tmp scratch:
 #   1. Discover the most-advanced trajectory for this system in object storage.
@@ -53,10 +52,8 @@
 
 set -euo pipefail
 
-PDB="${1:?usage: run_md_extend.sh <pdb_id> <mutation_tag> [target_ns]}"
-TAG="${2:?usage: run_md_extend.sh <pdb_id> <mutation_tag> [target_ns]}"
-TARGET_NS="${3:-500}"
-SYS="${PDB}_${TAG}"
+SYS="${1:?usage: run_md_extend.sh <system> [target_ns]}"
+TARGET_NS="${2:-500}"
 UNTIL_PS=$(( TARGET_NS * 1000 ))
 
 # object-storage coordinates; override via env. Defaults to http://cwlota.com,

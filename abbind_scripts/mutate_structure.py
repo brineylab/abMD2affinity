@@ -72,7 +72,7 @@ def apply_mutations(input_pdb: str, output_pdb: str, mut_str: str) -> None:
             actual = _pymol.stored.resn_check[0]
             expected = THREE_LETTER.get(wt, wt)
             if actual != expected:
-                print(f"  WARNING: AB-Bind expects {expected} at {chain}:{resnum} "
+                print(f"  WARNING: expected {expected} at {chain}:{resnum} "
                       f"but structure has {actual}; mutating anyway")
 
         print(f"  Mutating {chain}:{wt}{resnum} → {mut_three}")
