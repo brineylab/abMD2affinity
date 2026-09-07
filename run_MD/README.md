@@ -119,6 +119,10 @@ snakemake --configfile config.yaml --cores 32 --resources gpu=<n_gpus>
 # e.g. to hand production MD to the standalone slurm launcher
 snakemake --configfile config.yaml --cores 32 --resources gpu=<n_gpus> preprocess
 
+# Package the preprocessing essentials for hand-off
+# (<results_root>_essentials.tar.gz via scripts/package_preprocessing.py)
+snakemake --configfile config.yaml --cores 1 package
+
 # Short smoke test: the structures.yaml systems, 1 ns each
 # (wraps the container + GPU wiring)
 bash scripts/run_test_1ns.sh
@@ -157,4 +161,5 @@ them concurrently.
 | `scripts/extract_chains.py` | Extract specified chains from a PDB file |
 | `scripts/minimize_openmm.py` | Vacuum energy minimization via OpenMM + AMBER14 |
 | `scripts/render_movie.py` | Ray-trace trajectory frames with PyMOL for the movie (rule `movie`) |
+| `scripts/package_preprocessing.py` | Package a results tree for hand-off: production essentials only (or `--full`); `--manifest-root` rewrites manifest paths for wherever the archive is untarred |
 | `scripts/run_test_1ns.sh` | Run the 1 ns smoke test in the container with GPU wired in |
