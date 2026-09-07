@@ -72,9 +72,11 @@ def queued_names():
     return {n for n in out.split() if n.startswith(JOB_PREFIX)}
 
 
-def submit(system, out_dir, target_ns=None):
+def submit(system, out_dir, target_ns=None, nodelist=None):
     """sbatch run_md.sh (fresh) or run_md_extend.sh (extend); return the job id."""
     cmd = ["sbatch", f"--job-name={JOB_PREFIX}{system}"]
+    if nodelist:
+        cmd += ["--nodelist", nodelist]
     cmd += [RUN_SCRIPT, system, out_dir] if target_ns is None \
         else [RUN_EXTEND_SCRIPT, system, out_dir, str(target_ns)]
     out = subprocess.run(
@@ -208,7 +210,7 @@ def run_fresh(args, systems):
         free = args.cap - len(queued_names())
         while free > 0 and todo:
             system, out_dir = todo.pop(0)
-            job_id = submit(system, out_dir)
+            job_id = submit(system, out_dir, nodelist=args.nodelist)
             with open(os.path.join(out_dir, "launch.submitted"), "w") as fh:
                 fh.write(f"system: {system}\nsubmitted: {datetime.now().isoformat()}\n"
                          f"job: {job_id}\n")
@@ -300,7 +302,8 @@ def run_extend(args, systems):
         free = args.cap - len(active)
         while free > 0 and pending:
             system = pending.pop(0)
-            job_id = submit(system, systems[system], args.target_ns)
+            job_id = submit(system, systems[system], args.target_ns,
+                            nodelist=args.nodelist)
             attempts[system] += 1
             active.add(f"{JOB_PREFIX}{system}")
             tail = f" (attempt {attempts[system]})" if attempts[system] > 1 else ""
@@ -335,6 +338,9 @@ def main():
     ap.add_argument("--cap", type=int, default=98, help="max queued jobs (default: 98)")
     ap.add_argument("--interval", type=int, default=300,
                     help="seconds between queue-refill polls (default: 300)")
+    ap.add_argument("--nodelist", metavar="NODE",
+                    help="pin every submitted job to this node (sbatch "
+                         "--nodelist); jobs queue on it until a GPU frees up")
     ap.add_argument("--dry-run", action="store_true",
                     help="report what would be submitted; submit nothing")
     ext = ap.add_argument_group("extend mode")
