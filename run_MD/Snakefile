@@ -58,6 +58,7 @@ PYMOL_PYTHON   = config.get("pymol_python_bin", "python")
 OPENMM_PYTHON  = config.get("openmm_python_bin", "python")
 S5CMD          = config.get("s5cmd_bin", "s5cmd")
 OUTPUT_DEST    = (config.get("output_dir") or "").rstrip("/")  # object-storage sync destination
+PKG_ROOT       = (config.get("package_manifest_root") or "").rstrip("/") 
 MDP_MD_BASE    = config.get("mdp_md", "mdp/md.mdp")
 
 MAKE_MOVIE     = config.get("make_movie", True)
@@ -120,6 +121,32 @@ rule preprocess:
         [f"{v['output_dir']}/preprocessing/npt.gro" for v in SYSTEMS.values()]
         + [f"{v['output_dir']}/MD/md.mdp" for v in SYSTEMS.values()]
         + [str(RESULTS_ROOT / "manifest.json")],
+
+
+# ---------------------------------------------------------------------------
+# Package the preprocessing essentials for hand-off (rule package): per-system
+# npt.gro/.cpt + topology + MD/md.mdp + manifest.json ->
+# <results_root>_essentials.tar.gz, via scripts/package_preprocessing.py.
+# Set config key `package_manifest_root` to the directory the archive will be
+# untarred at on the destination machine to have the packaged manifest.json's
+# output_dir paths rewritten to match (blank = keep pipeline paths).
+# ---------------------------------------------------------------------------
+rule package:
+    input:
+        rules.preprocess.input,
+    output:
+        tar = str(RESULTS_ROOT) + "_essentials.tar.gz",
+    params:
+        root = str(RESULTS_ROOT),
+        extra = f"--manifest-root {PKG_ROOT}" if PKG_ROOT else "",
+    log:
+        str(RESULTS_ROOT / "logs" / "package.log"),
+    shell:
+        """
+        {GMX_PYTHON} scripts/package_preprocessing.py {params.root} \
+            -o {output.tar} {params.extra} \
+            > {log} 2>&1
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +275,7 @@ rule pdb2gmx:
             -ff amber99sb-ildn \
             -water tip3p \
             -ignh \
-            >> "$ROOT/{log}" 2>&1
+            >> "{log}" 2>&1
         """
 
 
@@ -320,18 +347,18 @@ rule genion:
         cd $(dirname {output.gro})
         gmx grompp \
             -f "$ROOT/{input.mdp}" \
-            -c "$ROOT/{input.gro}" \
+            -c "{input.gro}" \
             -p topol_ions.top \
             -o ions.tpr \
-            -maxwarn 1 \
-            >> "$ROOT/{log}" 2>&1
+            -maxwarn 2 \
+            >> "{log}" 2>&1
         printf 'SOL' | gmx genion \
             -s ions.tpr \
             -o ions.gro \
             -p topol_ions.top \
             -pname NA -nname CL \
             -neutral -conc 0.15 \
-            >> "$ROOT/{log}" 2>&1
+            >> "{log}" 2>&1
         """
 
 
@@ -359,12 +386,12 @@ rule gromacs_em:
             -c ions.gro \
             -p topol_ions.top \
             -o em.tpr \
-            -maxwarn 0 \
-            >> "$ROOT/{log}" 2>&1
+            -maxwarn 1 \
+            >> "{log}" 2>&1
         gmx mdrun \
             -v -deffnm em \
             -ntmpi 1 -ntomp {threads} \
-            >> "$ROOT/{log}" 2>&1
+            >> "{log}" 2>&1
         """
 
 
@@ -394,12 +421,12 @@ rule nvt:
             -r em.gro \
             -p topol_ions.top \
             -o nvt.tpr \
-            -maxwarn 0 \
-            >> "$ROOT/{log}" 2>&1
+            -maxwarn 1 \
+            >> "{log}" 2>&1
         gmx mdrun \
             -v -deffnm nvt \
             -ntmpi 1 -ntomp {threads} \
-            >> "$ROOT/{log}" 2>&1
+            >> "{log}" 2>&1
         """
 
 
@@ -434,12 +461,12 @@ rule npt:
             -t nvt.cpt \
             -p topol_ions.top \
             -o npt.tpr \
-            -maxwarn 0 \
-            >> "$ROOT/{log}" 2>&1
+            -maxwarn 1 \
+            >> "{log}" 2>&1
         gmx mdrun \
             -v -deffnm npt \
             -ntmpi 1 -ntomp {threads} \
-            >> "$ROOT/{log}" 2>&1
+            >> "{log}" 2>&1
         """
 
 
@@ -501,18 +528,18 @@ rule production_md:
         ROOT=$(pwd)
         PREDIR=$(dirname {input.top})
         MDDIR=$(dirname {output.gro})
-        TPR="$ROOT/$MDDIR/md.tpr"
+        TPR="$MDDIR/md.tpr"
 
         if [ ! -f "$TPR" ]; then
             cd "$PREDIR"
             gmx grompp \
-                -f "$ROOT/{input.mdp}" \
+                -f "{input.mdp}" \
                 -c npt.gro \
                 -t npt.cpt \
                 -p topol_ions.top \
                 -o "$TPR" \
                 -maxwarn 0 \
-                >> "$ROOT/{log}" 2>&1
+                >> "{log}" 2>&1
             cd "$ROOT"
         fi
 
@@ -525,7 +552,7 @@ rule production_md:
             $CPI \
             -ntmpi 1 -ntomp {threads} \
             -nb gpu -pme gpu -bonded gpu -update gpu \
-            >> "$ROOT/{log}" 2>&1
+            >> "{log}" 2>&1
         """
 
 

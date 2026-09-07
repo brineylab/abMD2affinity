@@ -15,6 +15,14 @@ structures_file: "structures.yaml"
 # waits for that sync. Blank = skip the sync and start production immediately.
 output_dir: "s3://brineylab-us-east/sferrier/"
 
+# --- Packaging (rule `package`) ---
+# Directory the essentials archive will be untarred at on the destination
+# machine: when set, the packaged manifest.json's output_dir paths are
+# rewritten to <package_manifest_root>/<system> so the archive is valid there
+# (and directly consumable by slurm/launch_experiments.py). Blank = keep the
+# pipeline's own paths.
+package_manifest_root: ""
+
 # --- Simulation ---
 # Base production-MD .mdp: every parameter except `nsteps` is copied verbatim.
 mdp_md: "mdp/md.mdp"
