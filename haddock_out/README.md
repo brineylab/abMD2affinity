@@ -31,6 +31,47 @@ snakemake --configfile config.yaml \
     --cores 32 --resources gpu=4 preprocess
 ```
 
+## Extending a subset to 500 ns
+
+Only a balanced 96-system subset (48 winners, 24 top-scored, 24 incorrect,
+spread across PDB ids) is extended to 500 ns; `select_extend_set.py` writes it
+out of `results/manifest.json`, each entry carrying `target_ns: 500`:
+
+```bash
+python select_extend_set.py            # -> results/manifest_extend500.json
+
+# on the cluster (submit node):
+cd ../run_MD
+python slurm/launch_experiments.py \
+    ../haddock_out/results/manifest_extend500.json \
+    --extend --cap 96 --max-attempts 20
+```
+
+A 495 ns extension spans several 48 h jobs; each attempt resumes from the
+previous job's checkpoint until the system writes `extend.done`.
+
+## Ground-truth complexes at 500 ns
+
+`prepare_ground_truth.py` extracts the crystal Fv + antigen (docked-model
+convention: chain A = antigen, chain B = Fv) for every complex whose docking
+succeeded — the PDBs with kept winners — from the epiLoRA SAbDab export,
+writing `data_gt/{pdb}_gt.pdb`, `intermediate_data/structures_gt.yaml` (a
+0.5 ns bootstrap run) and `results_gt/manifest_gt500.json` (`target_ns: 500`):
+
+```bash
+python prepare_ground_truth.py
+
+# on the cluster: preprocess, bootstrap production, then extend as above
+cd ../run_MD
+snakemake --configfile config.yaml \
+    --config structures_file=../haddock_out/intermediate_data/structures_gt.yaml \
+    --cores 32 --resources gpu=4 preprocess
+python slurm/launch_experiments.py ../haddock_out/results_gt/manifest.json
+python slurm/launch_experiments.py \
+    ../haddock_out/results_gt/manifest_gt500.json \
+    --extend --cap 96 --max-attempts 20
+```
+
 Layout:
 
 - `prep.yaml` — inputs and parameters (docking root, RMSD threshold, RNG

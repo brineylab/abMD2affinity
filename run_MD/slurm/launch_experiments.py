@@ -40,6 +40,7 @@ REPO = os.path.dirname(HERE)
 RUN_SCRIPT = os.path.join(HERE, "run_md.sh")
 RUN_EXTEND_SCRIPT = os.path.join(HERE, "run_md_extend.sh")
 JOB_PREFIX = "abmd_"   # only jobs named with this count toward --cap
+DEFAULT_TARGET_NS = 500
 
 # Object storage. The extend pre-check only lists (read-only), so default to the
 # externally reachable endpoint; override with OBJ_ENDPOINT. Unreachable =>
@@ -49,13 +50,16 @@ OBJ_BUCKET = os.environ.get("OBJ_BUCKET", "brineylab-us-east")
 
 
 def load_manifest(path):
-    """{system: {output_dir, ...}} from the pipeline's manifest.json."""
+    """({system: output_dir}, {system: target_ns}) from a manifest.json;
+    `target_ns` is optional per entry (extend-mode subset manifests)."""
     with open(path) as fh:
         manifest = json.load(fh)
-    out = {}
+    dirs, targets = {}, {}
     for name, entry in manifest.items():
-        out[name] = entry["output_dir"]
-    return out
+        dirs[name] = entry["output_dir"]
+        if entry.get("target_ns"):
+            targets[name] = int(entry["target_ns"])
+    return dirs, targets
 
 
 def queued_names():
@@ -155,22 +159,31 @@ def checkpoint_ns(src_prefix):
 
 def storage_state():
     """(latest, completed) or None if storage is unreachable.
-      latest    : {sys: highest jobid with an md.cpt} — run to resume from.
+      latest    : {sys: highest jobid with both an md.cpt and an md.xtc} — the
+                run to resume from; a cpt-only prefix died before its
+                trajectory uploaded and is not resumable.
       completed : set of sys with an md.gro (production run finished normally);
                   None if the md.gro listing was inconclusive (treat completion
                   as unknown).
     """
     base = f"s3://{OBJ_BUCKET}/{getpass.getuser()}"
 
-    cpt = _s5_ls(f"{base}/abmd_*/md.cpt")
-    if cpt is None:
+    def runs_with(fname):
+        """{(sys, jobid)} for every run prefix holding `fname`, or None."""
+        lines = _s5_ls(f"{base}/abmd_*/{fname}")
+        if lines is None:
+            return None
+        rx = re.compile(rf"abmd_(?P<sys>.+)_(?P<jobid>\d+)/{re.escape(fname)}\s*$")
+        return {(m.group("sys"), int(m.group("jobid"))) for line in lines
+                if (m := rx.search(line.strip()))}
+
+    cpt, xtc = runs_with("md.cpt"), runs_with("md.xtc")
+    if cpt is None or xtc is None:
         return None
     latest = defaultdict(lambda: -1)
-    rx_cpt = re.compile(r"abmd_(?P<sys>.+)_(?P<jobid>\d+)/md\.cpt\s*$")
-    for line in cpt:
-        m = rx_cpt.search(line.strip())
-        if m and int(m.group("jobid")) > latest[m.group("sys")]:
-            latest[m.group("sys")] = int(m.group("jobid"))
+    for sys_, jobid in cpt & xtc:
+        if jobid > latest[sys_]:
+            latest[sys_] = jobid
 
     gro = _s5_ls(f"{base}/abmd_*/md.gro")
     if gro is None:
@@ -223,9 +236,19 @@ def run_fresh(args, systems):
     print("all systems submitted")
 
 
-def run_extend(args, systems):
-    """Extend each system to --target-ns, resubmitting until its done marker
-    appears (or --max-attempts is hit). Completed production runs go first."""
+def run_extend(args, systems, targets):
+    """Extend each system to its target length (manifest target_ns, else
+    --target-ns, else 500), resubmitting until its done marker appears (or
+    --max-attempts is hit). Completed production runs go first."""
+    def target_of(system):
+        if args.target_ns is not None:
+            return args.target_ns
+        return targets.get(system, DEFAULT_TARGET_NS)
+
+    all_targets = {target_of(s) for s in systems}
+    tgt_label = (f"{all_targets.pop()} ns" if len(all_targets) == 1
+                 else "their manifest targets")
+
     state = None if args.no_check_storage else storage_state()
     latest, completed = (None, None) if state is None else state
     active = queued_names()
@@ -239,7 +262,7 @@ def run_extend(args, systems):
     ready, partial = [], []
     for system in systems:
         if is_done(system):
-            print(f"done     {system} (already at {args.target_ns} ns)")
+            print(f"done     {system} (already at {target_of(system)} ns)")
             continue
         if latest is not None and system not in latest:
             print(f"MISSING  {system}: no md.cpt in storage — skipping",
@@ -269,20 +292,21 @@ def run_extend(args, systems):
             src = f"abmd_{system}_{latest[system]}" if latest else "?"
             queued = " [in queue]" if in_queue(system) else ""
             tag = " [partial]" if system in partial_set else ""
+            target = target_of(system)
             cur = checkpoint_ns(f"s3://{OBJ_BUCKET}/{getpass.getuser()}/{src}") \
                 if latest else None
             if cur is None:
                 print(f"extend   {system}: from {src}, current length unknown"
-                      f" -> {args.target_ns} ns{tag}{queued}")
+                      f" -> {target} ns{tag}{queued}")
                 n_unknown += 1
             else:
-                togo = max(0.0, args.target_ns - cur)
+                togo = max(0.0, target - cur)
                 remaining_total += togo
                 print(f"extend   {system}: from {src} at {cur:.1f} ns"
-                      f" -> {args.target_ns} ns ({togo:.1f} ns to go){tag}{queued}")
+                      f" -> {target} ns ({togo:.1f} ns to go){tag}{queued}")
         n_queued = sum(1 for s in eligible if in_queue(s))
         note = f", {n_unknown} with unknown current length" if n_unknown else ""
-        print(f"\n{len(eligible)} systems would be extended to {args.target_ns} ns "
+        print(f"\n{len(eligible)} systems would be extended to {tgt_label} "
               f"(cap={args.cap}); {n_queued} already in queue{note}")
         print(f"~{remaining_total:.0f} ns total remaining across "
               f"{len(eligible) - n_unknown} readable systems")
@@ -291,7 +315,7 @@ def run_extend(args, systems):
         print("nothing to extend")
         return
 
-    print(f"{len(eligible)} systems to extend to {args.target_ns} ns; cap={args.cap}, "
+    print(f"{len(eligible)} systems to extend to {tgt_label}; cap={args.cap}, "
           f"interval={args.interval}s{', single wave' if args.once else ''}")
     attempts = defaultdict(int)
     while True:
@@ -302,7 +326,7 @@ def run_extend(args, systems):
         free = args.cap - len(active)
         while free > 0 and pending:
             system = pending.pop(0)
-            job_id = submit(system, systems[system], args.target_ns,
+            job_id = submit(system, systems[system], target_of(system),
                             nodelist=args.nodelist)
             attempts[system] += 1
             active.add(f"{JOB_PREFIX}{system}")
@@ -316,7 +340,7 @@ def run_extend(args, systems):
 
         remaining = [s for s in eligible if not is_done(s)]
         if not remaining:
-            print(f"all systems reached {args.target_ns} ns")
+            print(f"all systems reached {tgt_label}")
             return
         stuck = [s for s in remaining if attempts[s] >= args.max_attempts
                  and f"{JOB_PREFIX}{s}" not in active]
@@ -325,7 +349,7 @@ def run_extend(args, systems):
                   f"attempts: {', '.join(stuck)}", file=sys.stderr)
             return
         print(f"[{datetime.now():%H:%M:%S}] queue at {len(active)}/{args.cap}; "
-              f"{len(remaining)} not yet at {args.target_ns} ns; sleeping {args.interval}s")
+              f"{len(remaining)} not yet at {tgt_label}; sleeping {args.interval}s")
         time.sleep(args.interval)
 
 
@@ -347,8 +371,9 @@ def main():
     ext.add_argument("--extend", action="store_true",
                      help="continue existing trajectories to --target-ns instead of "
                           "starting fresh production runs")
-    ext.add_argument("--target-ns", type=int, default=500,
-                     help="total length to reach, ns (default: 500)")
+    ext.add_argument("--target-ns", type=int, default=None,
+                     help="total length to reach, ns; overrides the manifest's "
+                          f"per-system target_ns (default: {DEFAULT_TARGET_NS})")
     ext.add_argument("--max-attempts", type=int, default=1,
                      help="max resubmits per system before giving up (default: 1)")
     ext.add_argument("--once", action="store_true",
@@ -365,12 +390,15 @@ def main():
     os.environ.setdefault("NVIDIA_DRIVER_CAPABILITIES", "compute,utility")
 
     try:
-        systems = load_manifest(args.manifest)
+        systems, targets = load_manifest(args.manifest)
     except (OSError, ValueError, KeyError) as e:
         sys.exit(f"cannot read manifest {args.manifest}: {e}")
     if not systems:
         sys.exit(f"{args.manifest} lists no systems.")
-    (run_extend if args.extend else run_fresh)(args, systems)
+    if args.extend:
+        run_extend(args, systems, targets)
+    else:
+        run_fresh(args, systems)
 
 
 if __name__ == "__main__":

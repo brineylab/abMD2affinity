@@ -232,3 +232,9 @@ mutant_binding_affinity/mutants/
 haddock_out/results/
 haddock_out/data/
 haddock_out/intermediate_data/
+
+# Ground-truth complexes + their MD output (prepare_ground_truth.py)
+haddock_out/data_gt/
+haddock_out/results_gt/
+
+export/

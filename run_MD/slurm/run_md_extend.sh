@@ -78,13 +78,17 @@ source "/mnt/home/${SLURM_JOB_USER}/.env"
 USER_PREFIX="s3://${OBJ_BUCKET}/${SLURM_JOB_USER}"
 SELF_PREFIX="${USER_PREFIX}/${JOB_DIR}"
 
-s5() { s5cmd --endpoint-url "${OBJ_ENDPOINT}" "$@"; }
+# --part-size is a cp/sync flag, not a global s5cmd flag
+S5_PART_SIZE="${S5_PART_SIZE:-1024}"      # MiB per multipart chunk
+s5()     { s5cmd --endpoint-url "${OBJ_ENDPOINT}" "$@"; }
+s5cp()   { s5 cp   --part-size "${S5_PART_SIZE}" "$@"; }
+s5sync() { s5 sync --part-size "${S5_PART_SIZE}" "$@"; }
 
 # Push current scratch to THIS job's own prefix (checkpoint upload). Same shape
 # as sync_job_dir but without deleting scratch — safe to call repeatedly.
 push_checkpoint() {
     echo "[$(date)] ${SYS}: sync scratch -> ${SELF_PREFIX}/"
-    s5 sync --exclude "*/.*" --exclude ".*" "${JOB_WORK_DIR}/" "${SELF_PREFIX}/" \
+    s5sync --exclude "*/.*" --exclude ".*" "${JOB_WORK_DIR}/" "${SELF_PREFIX}/" \
         || echo "[$(date)] ${SYS}: WARN checkpoint sync failed (will retry)"
 }
 
@@ -92,8 +96,10 @@ cd "${JOB_WORK_DIR}"
 
 # --- 1. discover the furthest-along existing trajectory --------------------
 # Every run of this system (original run_md.sh run + any prior extend attempts)
-# lives at abmd_<sys>_<jobid>/. The largest jobid that has an md.cpt is the
-# furthest along. Skip our own (brand-new, empty) prefix.
+# lives at abmd_<sys>_<jobid>/. The largest jobid with both an md.cpt and an
+# md.xtc is the furthest along (mdrun -append cannot resume a cpt-only prefix
+# — a run that died before its trajectory uploaded). Skip our own (brand-new,
+# empty) prefix.
 echo "[$(date)] ${SYS}: locating latest trajectory under ${USER_PREFIX}/"
 BEST_DIR=""; BEST_ID=-1
 while read -r line; do
@@ -103,11 +109,12 @@ while read -r line; do
     id="${dir##*_}"
     case "$id" in ''|*[!0-9]*) continue ;; esac
     [ "$dir" = "$JOB_DIR" ] && continue
+    s5 ls "${USER_PREFIX}/${dir}/md.xtc" >/dev/null 2>&1 || continue
     if [ "$id" -gt "$BEST_ID" ]; then BEST_ID="$id"; BEST_DIR="$dir"; fi
 done < <(s5 ls "${USER_PREFIX}/abmd_${SYS}_*/md.cpt" 2>/dev/null || true)
 
 if [ -z "$BEST_DIR" ]; then
-    echo "[$(date)] ${SYS}: ERROR no md.cpt found under ${USER_PREFIX}/abmd_${SYS}_* — nothing to continue" >&2
+    echo "[$(date)] ${SYS}: ERROR no md.cpt + md.xtc run found under ${USER_PREFIX}/abmd_${SYS}_* — nothing to continue" >&2
     exit 1
 fi
 SRC="${USER_PREFIX}/${BEST_DIR}"
@@ -115,11 +122,21 @@ echo "[$(date)] ${SYS}: continuing from ${SRC}/"
 
 # Pull the files needed to extend + append. md.tpr/md.cpt are required;
 # md.xtc/md.edr/md.log let mdrun append into one continuous trajectory.
-s5 cp "${SRC}/md.tpr" .
-s5 cp "${SRC}/md.cpt" .
-for f in md.xtc md.edr md.log; do
-    s5 cp "${SRC}/${f}" . 2>/dev/null || echo "[$(date)] ${SYS}: note ${f} absent in source"
+s5cp "${SRC}/md.tpr" .
+s5cp "${SRC}/md.cpt" .
+for f in md.edr md.log; do
+    s5cp "${SRC}/${f}" . 2>/dev/null || echo "[$(date)] ${SYS}: note ${f} absent in source"
 done
+
+# md.xtc is the big pull and can fail when a whole wave of jobs starts at once;
+# mdrun -append cannot start without it, so retry and abort rather than burn
+# the GPU allocation.
+for attempt in 1 2 3 4 5; do
+    s5cp "${SRC}/md.xtc" . && break
+    echo "[$(date)] ${SYS}: md.xtc pull failed (attempt ${attempt}/5); retry in $((attempt * 30))s" >&2
+    sleep $((attempt * 30))
+done
+[ -f md.xtc ] || { echo "[$(date)] ${SYS}: ERROR could not fetch ${SRC}/md.xtc" >&2; exit 1; }
 
 # --- 2. raise the step count to the target length --------------------------
 echo "[$(date)] ${SYS}: convert-tpr -> ${TARGET_NS} ns (${UNTIL_PS} ps)"
