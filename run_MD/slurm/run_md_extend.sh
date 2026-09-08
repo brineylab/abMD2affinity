@@ -60,12 +60,12 @@ OUTDIR="${2:?usage: run_md_extend.sh <system> <output_dir> [target_ns]}"
 TARGET_NS="${3:-500}"
 UNTIL_PS=$(( TARGET_NS * 1000 ))
 
-# object-storage coordinates; override via env. Defaults to http://cwlota.com,
+# object-storage coordinates; override via env. Defaults to https://cwobject.com,
 # the cluster-internal endpoint that ~/.env's sync_job_dir uploads to (proven to
 # resolve on compute nodes). https://cwobject.com is the same store via the
-# externally reachable endpoint — set OBJ_ENDPOINT to it if cwlota.com does not
+# externally reachable endpoint — set OBJ_ENDPOINT to it if cwobject.com does not
 # resolve from where this job runs.
-OBJ_ENDPOINT="${OBJ_ENDPOINT:-http://cwlota.com}"
+OBJ_ENDPOINT="${OBJ_ENDPOINT:-https://cwobject.com}"
 OBJ_BUCKET="${OBJ_BUCKET:-brineylab-us-east}"
 
 PROJECT_DIR="${SLURM_SUBMIT_DIR}"   # repo checkout (for the container image)
