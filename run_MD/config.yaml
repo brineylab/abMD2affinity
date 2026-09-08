@@ -13,7 +13,7 @@ structures_file: "structures.yaml"
 # Object-storage destination every system's preprocessing/ tree is synced to
 # (rule sync_preprocessing) once ALL systems have equilibrated — production MD
 # waits for that sync. Blank = skip the sync and start production immediately.
-output_dir: "s3://brineylab-us-east/sferrier/"
+output_dir: "s3://brineylab-us-east/sferrier/09_06_dock_MD"
 
 # --- Packaging (rule `package`) ---
 # Directory the essentials archive will be untarred at on the destination

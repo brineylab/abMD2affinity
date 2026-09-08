@@ -39,6 +39,7 @@
 #SBATCH --job-name=abmd_extend          # overridden per-system on submit
 #SBATCH --partition=rtxp6000
 # --- resources -------------------------------------------------------------
+#SBATCH --nodes=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
